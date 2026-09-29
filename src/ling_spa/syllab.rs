@@ -1,0 +1,194 @@
+//! Syllabification: `FUN_1001e1e0`, called from `fe_AssignPhraseBreaks`
+//! (0x1001e750, see `breaks.rs`). English counterpart: `src\ling\syllab.rs`
+//! (`FUN_10012c70`/`FUN_10013c00`/`FUN_10013f30`/`FUN_10013da0`, 4
+//! functions). Violeta folds all of that into one function and is
+//! structurally much simpler:
+//!
+//!   * It does NOT read the CODES/MARKS this port's `words.rs` already
+//!     wrote at `wr::PHONES`/`wr2::MARKS` -- it re-scans the WA's raw
+//!     phone-mark string a second time (via each word's `wr2::PH_PTR`),
+//!     using the identical 'd'/'c' boundary rule as `words.rs`.
+//!   * Each 'd'/'c'-delimited group becomes exactly *one* syllable: a
+//!     single vowel nucleus (the first vowel found, by the shared
+//!     `PH_VOWEL` table) with everything before it as onset and everything
+//!     after as coda. There is no onset-legality clustering pass and no
+//!     `ONSETS` table -- Violeta's LTS/lexicon stage is assumed to have
+//!     already placed the boundaries correctly, so no maximal-onset
+//!     analysis is needed downstream.
+//!   * Per-syllable STRESS comes from a phone-code-indexed table
+//!     (`PH_STRESS`, `DAT_100673c0`) applied to the nucleus phone, not from
+//!     a separately-supplied stress array.
+//!   * Syllable records store *pointers* into the word's own CODES/POS
+//!     arrays (`syl::PHONES_PTR`/`syl::POS_PTR`, ling_spa's `mod.rs`)
+//!     rather than English's onset/coda phone-position indices, confirmed
+//!     against `VIOLETA_TODO.md`'s batch 2 note.
+//!
+//! `SYL_BASE` (`ling_spa::SYL_BASE = WORD_BASE + 100*WORD_SIZE = 0x2134c`)
+//! matches the literal constant in this function's decompile exactly --
+//! the lead's flagged guess is confirmed correct, no change needed.
+
+use super::words::wr2;
+use super::{syl, wr, SsSpa, WaSpa, SYL_BASE, SYL_SIZE};
+use crate::ling::{ptr_ss, sc};
+
+/// Syllable-record fields not yet in `ling_spa::syl` (lead owns that
+/// module): stress/shape/position, at the same relative offsets as
+/// English's `ling::syl::{STRESS,SHAPE,POSITION}`.
+pub mod syl2 {
+    pub const STRESS: usize = 0x00;
+    pub const SHAPE: usize = 0x01;
+    pub const POSITION: usize = 0x02;
+}
+
+const TAG_MASK: u32 = 0xf000_0000;
+const TAG_SS: u32 = 0x1000_0000;
+
+fn deref_ss(p: u32) -> usize {
+    debug_assert_eq!(p & TAG_MASK, TAG_SS);
+    (p & !TAG_MASK) as usize
+}
+
+/// `DAT_10067328`: nonzero = vowel. Shared with `context.rs`'s flag
+/// propagation (the engine uses the same table there).
+pub static PH_VOWEL: [u8; 256] = [
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x03, 0x03, 0x05,
+    0x03, 0x03, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x04, 0x03, 0x04, 0x00, 0x00, 0x05, 0x03, 0x06,
+];
+
+/// `DAT_100673c0`: per-phone-code inherent stress value, written to the
+/// nucleus syllable's `syl2::STRESS`.
+pub static PH_STRESS: [u8; 256] = [
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x03, 0x03, 0x05, 0x03, 0x03, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
+    0x04, 0x03, 0x04, 0x00, 0x00, 0x05, 0x03, 0x06, 0x06, 0x06, 0x06, 0x06, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x01, 0x03, 0x07, 0x07, 0x04, 0x04, 0x03, 0x00, 0x00, 0x04, 0x02, 0x02, 0x02, 0x02, 0x02,
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x05, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01,
+    0x01, 0x03, 0x03, 0x05, 0x03, 0x03, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x04, 0x03, 0x04, 0x01,
+    0x01, 0x04, 0x04, 0x02, 0x02, 0x02, 0x02, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x04, 0x02,
+    0x02, 0x04, 0x04, 0x04, 0x01, 0x01, 0x03, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x05,
+    0x05, 0x05, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0x41, 0x00, 0x00, 0x00, 0x41, 0x4f,
+    0x00, 0x00, 0x00, 0x41, 0x55, 0x00, 0x00, 0x00, 0x41, 0x59, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00,
+];
+
+/// `FUN_1001e1e0`, first pass: split each word's phone-mark string into
+/// 'd'/'c'-delimited groups and allocate one syllable-record slot per
+/// group, with `PHONES_PTR`/`POS_PTR` pointing at the right slice of the
+/// word's own CODES/POS arrays and `N_PHONES` set to the group's real
+/// (mark-excluded) phone count.
+fn split_groups(ss: &mut SsSpa, wa: &WaSpa) {
+    ss.set_i16(4, 0);
+    let nw = ss.n_words();
+    for i in 0..nw {
+        let w = SsSpa::word(i);
+        let base = SYL_BASE + ss.i16(4) as usize * SYL_SIZE;
+        ss.set_u32(w + wr::SYL_PTR, ptr_ss(base));
+        ss.set_u8(w + wr::N_SYL, 0);
+        ss.set_u32(base + syl::PHONES_PTR, ptr_ss(w + wr::PHONES));
+        ss.set_u32(base + syl::POS_PTR, ptr_ss(w + wr::POS));
+
+        let ph_off = (ss.u32(w + wr2::PH_PTR) & !TAG_MASK) as usize;
+        let ph = wa.cstr(ph_off);
+        let len = ph.len();
+        let mut run: i32 = 0;
+        let mut first_phone: u8 = 0;
+        let mut n_syl: u8 = 0;
+        for k in 0..len {
+            let c = ph[k];
+            if (c == b'd' || c == b'c') && run != 0 && k != len - 1 {
+                first_phone = first_phone.wrapping_add(run as u8);
+                let rec = base + n_syl as usize * SYL_SIZE;
+                ss.set_u8(rec + syl::N_PHONES, run as u8);
+                n_syl += 1;
+                let next = base + n_syl as usize * SYL_SIZE;
+                ss.set_u32(next + syl::PHONES_PTR, ptr_ss(w + wr::PHONES + first_phone as usize));
+                ss.set_u32(next + syl::POS_PTR, ptr_ss(w + wr::POS + first_phone as usize));
+                run = 0;
+            } else if c != b'd' && c != b'c' {
+                run += 1;
+            }
+        }
+        let rec = base + n_syl as usize * SYL_SIZE;
+        ss.set_u8(rec + syl::N_PHONES, run as u8);
+        n_syl += 1;
+        ss.set_u8(w + wr::N_SYL, n_syl);
+        ss.set_i16(4, ss.i16(4) + n_syl as i16);
+    }
+}
+
+/// `FUN_1001e1e0`, second pass: per group, find the (single) vowel nucleus,
+/// mark onset(1)/nucleus(2)/coda(3) in the word's POS array, set STRESS
+/// from the nucleus phone code, SHAPE from whether the group's first/last
+/// phone is the nucleus, and POSITION (1 first-in-word, 2 mid, 3
+/// last-in-word -- checked `if group==0` *first*, so a single-syllable
+/// word's only syllable gets POSITION=1, never 3, exactly as decompiled).
+fn classify_groups(ss: &mut SsSpa) {
+    let nw = ss.n_words();
+    for i in 0..nw {
+        let w = SsSpa::word(i);
+        let n_syl = ss.u8(w + wr::N_SYL) as usize;
+        let syl_base = deref_ss(ss.u32(w + wr::SYL_PTR));
+        for g in 0..n_syl {
+            let rec = syl_base + g * SYL_SIZE;
+            let n = ss.u8(rec + syl::N_PHONES) as usize;
+            ss.set_u8(rec + syl2::STRESS, 0);
+            let phones_off = deref_ss(ss.u32(rec + syl::PHONES_PTR));
+            let pos_off = deref_ss(ss.u32(rec + syl::POS_PTR));
+            let mut seen_nucleus = false;
+            for k in 0..n {
+                let code = ss.u8(phones_off + k);
+                if sc(&PH_VOWEL, code) == 0 {
+                    ss.set_u8(pos_off + k, if seen_nucleus { 3 } else { 1 });
+                } else {
+                    seen_nucleus = true;
+                    ss.set_u8(pos_off + k, 2);
+                    ss.set_u8(rec + syl2::STRESS, sc(&PH_STRESS, code));
+                }
+            }
+            // Engine reads pcVar14[0]/pcVar14[n-1] unconditionally even when
+            // n==0 (n-1 wraps to -1, one byte before pos_off); replicate
+            // exactly rather than special-casing it away.
+            let first_is_nuc = ss.u8(pos_off) == 2;
+            let last_is_nuc = ss.u8(pos_off.wrapping_add(n.wrapping_sub(1))) == 2;
+            let shape = match (first_is_nuc, last_is_nuc) {
+                (true, true) => 0,
+                (true, false) => 2,
+                (false, true) => 1,
+                (false, false) => 3,
+            };
+            ss.set_u8(rec + syl2::SHAPE, shape);
+            if g == 0 {
+                ss.set_u8(syl_base + syl2::POSITION, 1);
+            } else if g == n_syl - 1 {
+                ss.set_u8(rec + syl2::POSITION, 3);
+            } else {
+                ss.set_u8(rec + syl2::POSITION, 2);
+            }
+        }
+    }
+}
+
+/// `FUN_1001e1e0` in full.
+pub fn syllabify(ss: &mut SsSpa, wa: &WaSpa) {
+    split_groups(ss, wa);
+    classify_groups(ss);
+}

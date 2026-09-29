@@ -1,0 +1,367 @@
+//! String/character tables for the non-number normalizers (VTML, user-dict
+//! pre-pass, tag mode, URL, dates, time, phone, symbols, math).
+
+/// `DAT_1006fbe0`: symbol key byte + Spanish name, 0x2a-byte stride
+/// (`FUN_10043860` binary-searches this by key).
+pub const SYMBOL_NAMES: [(u8, &[u8]); 39] = [
+    (b'!', b"cerrar exclamaci\xf3n"),
+    (b'"', b"doble comillas"),
+    (b'#', b"signo de n\xfamero"),
+    (b'$', b"d\xf3lar"),
+    (b'%', b"por ciento"),
+    (b'&', b"ampersand"),
+    (b'\'', b"ap\xf3strofe"),
+    (b'(', b"abrir par\xe9ntesis"),
+    (b')', b"cerrar par\xe9ntesis"),
+    (b'*', b"asterisco"),
+    (b'+', b"signo m\xe1s"),
+    (b',', b"coma"),
+    (b'-', b"gui\xf3n"),
+    (b'.', b"punto"),
+    (b'/', b"barra"),
+    (b':', b"dos puntos"),
+    (b';', b"punto y coma"),
+    (b'<', b"menor"),
+    (b'=', b"igual"),
+    (b'>', b"mayor"),
+    (b'?', b"interrogaci\xf3n"),
+    (b'@', b"arroba"),
+    (b'[', b"corchete izquierdo"),
+    (b'\\', b"barra inversa"),
+    (b']', b"corchete derecho"),
+    (b'^', b"circunflejo"),
+    (b'_', b"gui\xf3n bajo"),
+    (b'`', b"acento agudo"),
+    (b'{', b"abrir llave"),
+    (b'|', b"barra vertical"),
+    (b'}', b"cerrar llave"),
+    (b'~', b"tilde"),
+    (0xa1, b"abrir exclamaci\xf3n"),
+    (0xaa, b"do\xf1a"),
+    (0xb0, b"grados"),
+    (0xba, b"g\xe9nero masculino"),
+    (0xbf, b"abrir interrogaci\xf3n"),
+    (0xc7, b"cedilla"),
+    (0xe7, b"cedilla"),
+];
+
+/// `FUN_10043860`: binary search `SYMBOL_NAMES` by key byte.
+pub fn symbol_name_index(key: u8) -> i32 {
+    if key == 0 {
+        return -1;
+    }
+    if SYMBOL_NAMES.is_empty() {
+        return -1;
+    }
+    let (mut lo, mut hi): (i32, i32) = (0, SYMBOL_NAMES.len() as i32 - 1);
+    loop {
+        let mid = (lo + hi) / 2;
+        let k = SYMBOL_NAMES[mid as usize].0;
+        if k == key {
+            return mid;
+        }
+        if k < key {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+        if lo > hi {
+            return -1;
+        }
+    }
+}
+
+/// `s_..._1007a878`: URL-path punctuation allowed while spelling a tag-mode
+/// remainder (`FUN_10049c60`).
+pub const TAGMODE_PUNCT: &[u8] = b";/?:@&=+$,-_.!~*#\\%";
+
+/// `s_..._100694a4`: symbol chars kept as one run inside `FUN_10035880`
+/// (note: no `\` or `%`, unlike `TAGMODE_PUNCT`).
+pub const WORDS_PUNCT: &[u8] = b";/?:@&=+$,-_.!~*#";
+
+/// `DAT_10072ec8`/`DAT_10079e48` (217 entries), transcribed exactly via
+/// `pefile` (`extract_tables.py`/`gen_unit_table.py` in the v4c_units
+/// workspace, not by hand) for `FUN_10033990` (the units normalizer's
+/// word-unit lookup -- see `norm_units.rs`). Each entry is
+/// (key, alt spelling, dash-plural suffix, feminine). `FUN_100338b0`'s own
+/// `DAT_10082060`/`DAT_10082064`/`DAT_10082068` word-dictionary cascade
+/// (tried first by the engine, ahead of this table) was also read via
+/// `pefile`: all three headers report a subtable count of 0 in this DLL
+/// build, i.e. that cascade is always-empty dead code here, so
+/// `FUN_10033990`/this table is the live path -- confirmed by reading the
+/// data, not assumed.
+pub const UNIT_WORDS: [(&[u8], &[u8], &[u8], bool); 217] = [
+    (b"acre", b"", b"-s", false),
+    (b"atm\xf3sfera", b"", b"-s", true),
+    (b"a\xf1o luz", b"", b"-s", false),
+    (b"bar", b"", b"-s", false),
+    (b"barleycorn", b"", b"-s", false),
+    (b"barril", b"", b"-es", false),
+    (b"becquerel", b"", b"-s", false),
+    (b"braza", b"", b"-s", true),
+    (b"bushel", b"", b"-s", false),
+    (b"byte", b"", b"-s", false),
+    (b"cadena", b"", b"-s", true),
+    (b"calory", b"calories", b"", false),
+    (b"calor\xeda", b"", b"-s", true),
+    (b"calor\xedas", b"", b"", true),
+    (b"candela", b"", b"-s", true),
+    (b"centavo", b"", b"-s", false),
+    (b"centilitro", b"", b"-s", false),
+    (b"cent\xedgrado", b"", b"-s", false),
+    (b"cent\xedmetro", b"", b"-s", false),
+    (b"codo", b"", b"-s", false),
+    (b"cuadrado", b"", b"-s", false),
+    (b"culombio", b"", b"-s", false),
+    (b"decibelio", b"", b"-s", false),
+    (b"decilitro", b"", b"-s", false),
+    (b"dec\xe1metro", b"", b"-s", false),
+    (b"dec\xedmetro", b"", b"-s", false),
+    (b"denario", b"", b"-s", false),
+    (b"dina", b"", b"-s", true),
+    (b"d\xf3lar", b"", b"-es", false),
+    (b"ell", b"", b"-s", false),
+    (b"em", b"", b"-s", false),
+    (b"erg", b"", b"-s", false),
+    (b"escuadra", b"", b"-s", true),
+    (b"estereorradi\xe1n", b"", b"-s", false),
+    (b"euro", b"", b"-s", false),
+    (b"fahrenheit", b"", b"-s", false),
+    (b"furlong", b"", b"-s", false),
+    (b"gal\xf3n", b"", b"-s", false),
+    (b"giga amperio", b"", b"-s", false),
+    (b"giga byte", b"", b"-s", false),
+    (b"giga hercio", b"", b"", false),
+    (b"giga julio", b"", b"-s", false),
+    (b"giga pascal", b"", b"-s", false),
+    (b"giga vatio", b"", b"-s", false),
+    (b"giga voltio", b"", b"-s", false),
+    (b"gigaamperio", b"", b"-s", false),
+    (b"gigabyte", b"", b"-s", false),
+    (b"gigahercio", b"", b"", false),
+    (b"gigajulio", b"", b"-s", false),
+    (b"gigapascal", b"", b"-s", false),
+    (b"gigavatio", b"", b"-s", false),
+    (b"gigavoltio", b"", b"-s", false),
+    (b"grado", b"", b"-s", false),
+    (b"gramo", b"", b"-s", false),
+    (b"grano", b"", b"-s", false),
+    (b"gray", b"", b"-s", false),
+    (b"hecto gramo", b"", b"-s", false),
+    (b"hecto pascal", b"", b"-s", false),
+    (b"hectopascal", b"", b"-s", false),
+    (b"hect\xe1rea", b"", b"-s", true),
+    (b"hect\xf3gramo", b"", b"-s", false),
+    (b"hercio", b"", b"", false),
+    (b"hora", b"", b"-s", true),
+    (b"julio", b"", b"-s", false),
+    (b"kelvin", b"", b"-s", false),
+    (b"kilo amperio", b"", b"-s", false),
+    (b"kilo byte", b"", b"-s", false),
+    (b"kilo calor?", b"", b"-s", false),
+    (b"kilo gramo", b"", b"-s", false),
+    (b"kilo hercio", b"", b"", false),
+    (b"kilo litro", b"", b"-s", false),
+    (b"kilo metro", b"", b"-s", false),
+    (b"kilo newton", b"", b"-s", false),
+    (b"kilo ohm", b"", b"-s", false),
+    (b"kilo pascal", b"", b"-s", false),
+    (b"kilo vatio", b"", b"-s", false),
+    (b"kilo voltio", b"", b"-s", false),
+    (b"kiloamperio", b"", b"-s", false),
+    (b"kilobyte", b"", b"-s", false),
+    (b"kilocalor\xeda", b"", b"-s", false),
+    (b"kilogramo", b"", b"-s", false),
+    (b"kilohercio", b"", b"", false),
+    (b"kilolitro", b"", b"-s", false),
+    (b"kilonewton", b"", b"-s", false),
+    (b"kiloohm", b"", b"-s", false),
+    (b"kilopascal", b"", b"-s", false),
+    (b"kilovatio", b"", b"-s", false),
+    (b"kilovoltio", b"", b"-s", false),
+    (b"kil\xf3metro", b"", b"-s", false),
+    (b"kip", b"", b"-s", false),
+    (b"legua", b"", b"-s", true),
+    (b"libra", b"", b"-s", true),
+    (b"link", b"", b"-s", false),
+    (b"litro", b"", b"-s", false),
+    (b"lluvia", b"", b"-s", true),
+    (b"luces", b"", b"", true),
+    (b"lumen", b"", b"", false),
+    (b"lumina", b"", b"", true),
+    (b"lux", b"", b"", false),
+    (b"mega amperio", b"", b"-s", false),
+    (b"mega byte", b"", b"-s", false),
+    (b"mega gramo", b"", b"-s", false),
+    (b"mega hercio", b"", b"", false),
+    (b"mega julio", b"", b"-s", false),
+    (b"mega newton", b"", b"-s", false),
+    (b"mega ohm", b"", b"-s", false),
+    (b"mega pascal", b"", b"-s", false),
+    (b"mega vatio", b"", b"-s", false),
+    (b"mega voltio", b"", b"-s", false),
+    (b"megaamperio", b"", b"-s", false),
+    (b"megabyte", b"", b"-s", false),
+    (b"megagramo", b"", b"-s", false),
+    (b"megahercio", b"", b"", false),
+    (b"megajulio", b"", b"-s", false),
+    (b"meganewton", b"", b"-s", false),
+    (b"megaohm", b"", b"-s", false),
+    (b"megapascal", b"", b"-s", false),
+    (b"megavatio", b"", b"-s", false),
+    (b"megavoltio", b"", b"-s", false),
+    (b"metro", b"", b"-s", false),
+    (b"micro amperio", b"", b"-s", false),
+    (b"micro faradio", b"", b"-s", false),
+    (b"micro gramo", b"", b"-s", false),
+    (b"micro litro", b"", b"-s", false),
+    (b"micro metro", b"", b"-s", false),
+    (b"micro segundo", b"", b"-s", false),
+    (b"micro vatio", b"", b"-s", false),
+    (b"micro voltio", b"", b"-s", false),
+    (b"microamperio", b"", b"-s", false),
+    (b"microfaradio", b"", b"-s", false),
+    (b"microgramo", b"", b"-s", false),
+    (b"microlitro", b"", b"-s", false),
+    (b"microsegundo", b"", b"-s", false),
+    (b"microvatio", b"", b"-s", false),
+    (b"microvoltio", b"", b"-s", false),
+    (b"micr\xf3metro", b"", b"-s", false),
+    (b"micr\xf3n", b"", b"-s", false),
+    (b"mili bar", b"", b"-s", false),
+    (b"mili gramo", b"", b"-s", false),
+    (b"mili litro", b"", b"-s", false),
+    (b"mili metro", b"", b"-s", false),
+    (b"mili segundo", b"", b"-s", false),
+    (b"milibar", b"", b"-s", false),
+    (b"miligramo", b"", b"-s", false),
+    (b"mililitro", b"", b"-s", false),
+    (b"milimetro", b"", b"-s", false),
+    (b"milisegundo", b"", b"-s", false),
+    (b"milla", b"", b"-s", true),
+    (b"minuto", b"", b"-s", false),
+    (b"mol", b"", b"-s", false),
+    (b"nano amperio", b"", b"-s", false),
+    (b"nano faradio", b"", b"-s", false),
+    (b"nano metro", b"", b"-s", false),
+    (b"nano segundo", b"", b"-s", false),
+    (b"nano vatio", b"", b"-s", false),
+    (b"nano voltio", b"", b"-s", false),
+    (b"nanoamperio", b"", b"-s", false),
+    (b"nanofaradio", b"", b"-s", false),
+    (b"nanosegundo", b"", b"-s", false),
+    (b"nanovatio", b"", b"-s", false),
+    (b"nanovoltio", b"", b"-s", false),
+    (b"nan\xf3metro", b"", b"-s", false),
+    (b"newton", b"", b"-s", false),
+    (b"newton metro", b"", b"-s", false),
+    (b"newtonmetro", b"", b"-s", false),
+    (b"nudo", b"", b"-s", false),
+    (b"ohmio", b"", b"-s", false),
+    (b"onza", b"", b"-s", true),
+    (b"parsec", b"", b"-s", false),
+    (b"pascal", b"", b"-s", false),
+    (b"pica", b"", b"-s", true),
+    (b"pico amperio", b"", b"-s", false),
+    (b"pico faradio", b"", b"-s", false),
+    (b"pico segundo", b"", b"-s", false),
+    (b"pico vatio", b"", b"-s", false),
+    (b"pico voltio", b"", b"-s", false),
+    (b"picoamperio", b"", b"-s", false),
+    (b"picofaradio", b"", b"-s", false),
+    (b"picosegundo", b"", b"-s", false),
+    (b"picovatio", b"", b"-s", false),
+    (b"picovoltio", b"", b"-s", false),
+    (b"pie", b"", b"-s", false),
+    (b"piedra", b"", b"-s", true),
+    (b"pinta", b"", b"-s", true),
+    (b"por ciento", b"", b"", false),
+    (b"por mil", b"", b"", false),
+    (b"poundal", b"", b"-s", false),
+    (b"pulgada", b"", b"", true),
+    (b"pulgadas", b"", b"", true),
+    (b"punto", b"", b"-s", false),
+    (b"p\xe1rsec", b"", b"-s", false),
+    (b"p\xe9rtica", b"", b"-s", true),
+    (b"quilate", b"", b"-s", false),
+    (b"quintal", b"", b"-s", false),
+    (b"radi\xe1n", b"", b"-s", false),
+    (b"rankine", b"", b"-s", false),
+    (b"reaumur", b"", b"-s", false),
+    (b"rod", b"", b"-s", false),
+    (b"segundo", b"", b"-s", false),
+    (b"sievert", b"", b"-s", false),
+    (b"slug", b"", b"-s", false),
+    (b"sthene", b"", b"-s", false),
+    (b"tera byte", b"", b"-s", false),
+    (b"tera hercio", b"", b"", false),
+    (b"terabyte", b"", b"-s", false),
+    (b"terahercio", b"", b"", false),
+    (b"termia", b"", b"-s", true),
+    (b"tonelada", b"", b"-s", true),
+    (b"unidad t\xe9rmica brit\xe1nica", b"unidads t\xe9rmica brit\xe1nica", b"", false),
+    (b"vatio", b"", b"-s", false),
+    (b"voltio", b"", b"-s", false),
+    (b"v\xe9ase HP", b"", b"", false),
+    (b"weber", b"", b"-s", false),
+    (b"yarda", b"", b"-s", true),
+    (b"yen", b"", b"", false),
+    (b"\xe1ngstrom", b"", b"-s", false),
+    (b"\xe1rea", b"", b"-s", false),
+];
+
+/// `FUN_10033990`, simplified to the plain (non-hyphenated-continuation)
+/// case: binary search `UNIT_WORDS` (case-insensitively, `FUN_10044320`'s
+/// own `dict_StrnCmpU`/`FUN_10007110` mode) for `word` exactly; on failure,
+/// strip one trailing byte and retry (`FUN_10033990`'s own `_Count =
+/// strlen-1` re-search, gated on `_Count > 1` i.e. the *original* word being
+/// at least 3 bytes -- confirmed off the disassembly's strlen idiom, not the
+/// `len >= 2`/`len >= 4` either of this file's or `abbrev.rs`'s own
+/// pre-dedup copy used), accepting the second search only if the
+/// dash-plural suffix starts with '-' and its next byte is the stripped
+/// byte (e.g. "nudos" strips to "nudo", whose dash is "-s" and the stripped
+/// byte was 's' -- match). Returns `(rendered_word, feminine)`: the
+/// rendered word is the entry's `alt` spelling if non-empty, else the plain
+/// key on a direct hit, else `key + dash[1..]` on a plural-suffix hit, else
+/// (a stripped hit whose dash doesn't match the stripped byte) the original
+/// `word` text unchanged -- `FUN_10033990`'s own quirk, ported as read.
+pub fn unit_word(word: &[u8]) -> Option<(Vec<u8>, bool)> {
+    fn search(key: &[u8]) -> Option<usize> {
+        let (mut lo, mut hi): (i32, i32) = (0, UNIT_WORDS.len() as i32 - 1);
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            let c = crate::ling_spa::lexicon::stricmp_spa(UNIT_WORDS[mid as usize].0, key);
+            if c == 0 {
+                return Some(mid as usize);
+            } else if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        None
+    }
+    if let Some(i) = search(word) {
+        let (key, alt, _dash, fem) = UNIT_WORDS[i];
+        let rendered = if !alt.is_empty() { alt.to_vec() } else { key.to_vec() };
+        return Some((rendered, fem));
+    }
+    if word.len() < 3 {
+        return None;
+    }
+    let stripped = &word[..word.len() - 1];
+    let last = word[word.len() - 1];
+    if let Some(i) = search(stripped) {
+        let (key, _alt, dash, fem) = UNIT_WORDS[i];
+        let rendered = if dash.first() == Some(&b'-') && dash.get(1) == Some(&last) {
+            let mut w = key.to_vec();
+            w.extend_from_slice(&dash[1..]);
+            w
+        } else {
+            word.to_vec()
+        };
+        return Some((rendered, fem));
+    }
+    None
+}
+

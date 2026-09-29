@@ -9,10 +9,13 @@
 pub mod classes;
 #[path = "unitsel_tables.rs"]
 pub mod tables;
+#[path = "unitsel_tables_spa.rs"]
+pub mod tables_spa;
 
-use self::classes::{class_key, half_key, Classes};
+use self::classes::{class_key_lang, half_key_lang, half_key_len, Classes};
 use self::tables::{DATA, DATA_LO, LEFT_POS_LISTS, RDATA, RDATA_LO, RIGHT_POS_LISTS};
 use crate::bank::Bank;
+use crate::lang::Lang;
 
 const MAX_CANDS: usize = 10000;
 const BEAM: usize = 30;
@@ -49,10 +52,54 @@ const T_C384: u32 = 0x1007c384;
 const T_C3E4: u32 = 0x1007c3e4;
 const T_C444: u32 = 0x1007c444;
 
-/// Cepstral VQ distance matrix (`cepdist.tbl`), lower triangular.
+// -------------------------------------------------------------- Violeta (vt_spa_violeta16.dll)
+//
+// Tables located by decompiling us_TargetCost (0x1001f1a0), us_ViterbiJoinStep
+// (0x1001f9d0), the lattice (0x1001f600 = us_ContextBackoffLattice),
+// us_IsUnvoicedCenter (0x1001d610) and the class-key/half-key builders
+// (0x1001d470 / 0x1001d4c0) in Ghidra. `tools_spa/gen_unitsel_tables_spa.py`
+// (in this agent's workspace) copies the whole 0x10067100-0x10067c00 .rdata
+// span verbatim into `unitsel_tables_spa.rs`, exactly as the English table
+// generator copies 0x1007b600-0x1007c600.
+fn tbs(addr: u32, i: u8) -> u8 {
+    tables_spa::DATA[(addr - tables_spa::DATA_LO) as usize + i as usize]
+}
+
+fn tis(addr: u32, i: usize) -> i32 {
+    let o = (addr - tables_spa::DATA_LO) as usize + 4 * i;
+    i32::from_le_bytes([tables_spa::DATA[o], tables_spa::DATA[o + 1], tables_spa::DATA[o + 2], tables_spa::DATA[o + 3]])
+}
+
+fn tfs(addr: u32, i: usize) -> f32 {
+    f32::from_bits(tis(addr, i) as u32)
+}
+
+const S_T_COLLAPSE: u32 = 0x10067114;
+const S_T_VOWEL: u32 = 0x10067328;
+const S_T_VOICED: u32 = 0x10067374;
+const S_T_STRESS: u32 = 0x100673c0;
+const S_T_BROAD: u32 = 0x10067458;
+const S_BF14: u32 = 0x100676c0; // class_key_dist weights (5 i32): 40,1,40,10,1000 (same as English)
+const S_BF28: u32 = 0x100676d4; // half_key_dist weights (11 i32, not 10)
+const S_BFD8: u32 = 0x1006774c; // join edge-position penalty, 8x8 i32
+const S_POS1: u32 = 0x1006784c; // target-cost position penalty (tl_lpos*5+ul_lpos), 25 i32
+const S_POS2: u32 = 0x100678b0; // target-cost position penalty (ul_rpos+tl_rpos*8), 25 i32
+const S_C23C: u32 = 0x100679b0; // stress-unequal-centre penalty: st(ul.C) + st(tl.C)*2 (2 stress levels, not 3)
+const S_C260: u32 = 0x100679c0; // stress-equal-centre penalty: st(tl.R1)*3 + st(ul.R1)
+const S_JOIN_W: u32 = 0x100679e8; // [wc,wf,wb] x 4 join types, 12 f32 each
+const S_EDGE_SUB: u32 = 0x10067a24;
+const S_C544: u32 = 0x10067ac4; // join class-pair penalty, class in 0..=2 -> 3x3 i32
+
+/// Cepstral VQ distance matrix (`cepdist.tbl` / `cepdist.tbl.rd`), lower
+/// triangular. `us_ReadCepDistTable` (0x1001ad20 English, 0x10005a40 Violeta)
+/// reads an optional tail after the triangle: `u16 m` then `m` u16 remap
+/// entries mapping a wider codeword space (Violeta: 1024) onto the `n`-row
+/// triangle (Violeta: 256). English's file has no tail, so `remap` stays
+/// empty and `resolve` is the identity -- one loader/lookup path for both.
 pub struct CepDist {
     pub n: usize,
     tri: Vec<f32>,
+    remap: Vec<u16>,
 }
 
 impl CepDist {
@@ -63,10 +110,29 @@ impl CepDist {
         let tri = (0..cnt)
             .map(|i| f32::from_le_bytes([b[2 + 4 * i], b[3 + 4 * i], b[4 + 4 * i], b[5 + 4 * i]]))
             .collect();
-        Ok(CepDist { n, tri })
+        let tail = 2 + 4 * cnt;
+        let mut remap = Vec::new();
+        if b.len() > tail + 2 {
+            let m = u16::from_le_bytes([b[tail], b[tail + 1]]) as usize;
+            if b.len() >= tail + 2 + 2 * m {
+                remap = (0..m).map(|i| u16::from_le_bytes([b[tail + 2 + 2 * i], b[tail + 3 + 2 * i]])).collect();
+            }
+        }
+        Ok(CepDist { n, tri, remap })
+    }
+
+    /// Maps a raw (possibly wider-space) codeword onto a `0..n` triangle row,
+    /// through the remap table when one was loaded.
+    fn resolve(&self, code: u16) -> u16 {
+        if self.remap.is_empty() {
+            code
+        } else {
+            self.remap[code as usize]
+        }
     }
 
     pub fn get(&self, a: u16, b: u16) -> f32 {
+        let (a, b) = (self.resolve(a), self.resolve(b));
         let (hi, lo) = if a < b { (b as usize, a as usize) } else { (a as usize, b as usize) };
         self.tri[hi * (hi + 1) / 2 + lo]
     }
@@ -126,18 +192,33 @@ pub struct Word {
 impl Word {
     /// Build from a raw word record and its syllable records.
     pub fn from_raw(raw: &[u8], syls: &[Vec<u8>]) -> Word {
-        let n_ph = raw[0x95] as usize;
-        let mut w = Word { domain: raw[0x2df], ..Default::default() };
+        Self::from_raw_lang(raw, syls, Lang::Eng)
+    }
+
+    /// `raw`/`syls` are the WORD_SIZE/SYL_SIZE-byte records the harness
+    /// captured (`hooks.js` for English, `hooks_spa.js` for Violeta). Offsets
+    /// below are word/syllable-relative; Violeta's differ from English's per
+    /// `harness\hooks_spa.js`'s header comment (confirmed against the
+    /// decompile of us_BuildTargets/us_TargetCost/us_GetCandidates). Violeta
+    /// has no `mflag` (its lattice never substitutes a broader centre class),
+    /// so that field stays all zero.
+    pub fn from_raw_lang(raw: &[u8], syls: &[Vec<u8>], lang: Lang) -> Word {
+        let (n_ph_off, dur_off, ctx_off, edge_off, dom_off, syl_nph_off) = match lang {
+            Lang::Eng => (0x95, 0x10, 0x96, 0x25d, 0x2df, 0x1d),
+            Lang::Spa => (0xdb, 0x10, 0xdc, 0x398, 0x3fc, 0x24),
+        };
+        let n_ph = raw[n_ph_off] as usize;
+        let mut w = Word { domain: raw[dom_off], ..Default::default() };
         for k in 0..n_ph {
-            w.dur.push(i16::from_le_bytes([raw[0x10 + 2 * k], raw[0x11 + 2 * k]]));
+            w.dur.push(i16::from_le_bytes([raw[dur_off + 2 * k], raw[dur_off + 1 + 2 * k]]));
             let mut c = [0u8; 7];
-            c.copy_from_slice(&raw[0x96 + 7 * k..0x9d + 7 * k]);
+            c.copy_from_slice(&raw[ctx_off + 7 * k..ctx_off + 7 + 7 * k]);
             w.ctx.push(c);
-            w.edge_code.push(raw[0x25d + k]);
-            w.mflag.push(raw[0x29e + k]);
+            w.edge_code.push(raw[edge_off + k]);
+            w.mflag.push(if lang == Lang::Eng { raw[0x29e + k] } else { 0 });
         }
         for s in syls {
-            w.syl_nph.push(s[0x1d]);
+            w.syl_nph.push(s[syl_nph_off]);
             let mut f = [0i16; 12];
             for (i, v) in f.iter_mut().enumerate() {
                 *v = i16::from_le_bytes([s[4 + 2 * i], s[5 + 2 * i]]);
@@ -227,10 +308,15 @@ pub struct Selector<'a> {
     /// rounds every float operation of the target-cost tail and the join step to
     /// f32, in its own term order, where the 32-bit x87 build rounds once per store.
     pub x64: bool,
+    pub lang: Lang,
 }
 
 impl<'a> Selector<'a> {
     pub fn new(bank: &'a Bank, cls: &'a Classes, cep: &'a CepDist, sd: &'a ScalarDist) -> Selector<'a> {
+        Self::new_lang(bank, cls, cep, sd, Lang::Eng)
+    }
+
+    pub fn new_lang(bank: &'a Bank, cls: &'a Classes, cep: &'a CepDist, sd: &'a ScalarDist, lang: Lang) -> Selector<'a> {
         Selector {
             bank,
             cls,
@@ -248,6 +334,7 @@ impl<'a> Selector<'a> {
             word_ntargets: Vec::new(),
             scratch: vec![0.0; BEAM],
             x64: false,
+            lang,
         }
     }
 
@@ -457,40 +544,60 @@ impl<'a> Selector<'a> {
 
     // --------------------------------------------------------- class ranking
 
-    /// `FUN_10023a70`: weighted mismatch between two class keys.
-    fn key_dist(a: &[u8; 5], b: &[u8; 5], half: u8) -> i32 {
+    /// `FUN_10023a70` (English) / `FUN_1000ea10` (Violeta): weighted mismatch
+    /// between two class keys. Violeta's half key is 11 bytes (`S_BF28`), not 10.
+    fn key_dist(&self, a: &[u8; 5], b: &[u8; 5], half: u8) -> i32 {
         let mut d = 0;
         for i in 0..5 {
             if a[i] != b[i] {
-                d += ti(0x1007bf14, i);
+                d += match self.lang {
+                    Lang::Eng => ti(0x1007bf14, i),
+                    Lang::Spa => tis(S_BF14, i),
+                };
             }
         }
         if half != 0 {
-            let ha = half_key(a, half);
-            let hb = half_key(b, half);
-            for i in 0..10 {
+            let ha = half_key_lang(a, half, self.lang);
+            let hb = half_key_lang(b, half, self.lang);
+            for i in 0..half_key_len(self.lang) {
                 if ha[i] != hb[i] {
-                    d += ti(0x1007bf28, i);
+                    d += match self.lang {
+                        Lang::Eng => ti(0x1007bf28, i),
+                        Lang::Spa => tis(S_BF28, i),
+                    };
                 }
             }
         }
         d
     }
 
-    /// `us_LimitClasses30x10000` (half = 0) / `FUN_10023c70` (half = 1, 2):
-    /// keep at most `maxc` classes, closest first, stopping once `maxu` units
-    /// are exceeded (the class that crosses the limit is kept).
+    fn class_key(&self, label: &[u8; 7]) -> [u8; 5] {
+        class_key_lang(label, self.lang)
+    }
+
+    /// `us_IsUnvoicedCenter` (0x10017010 English, 0x1001d610 Violeta): `ba44[c] != 0`.
+    fn is_voiced(&self, c: u8) -> u8 {
+        match self.lang {
+            Lang::Eng => tb(T_VOICED, c),
+            Lang::Spa => tbs(S_T_VOICED, c),
+        }
+    }
+
+    /// `us_LimitClasses30x10000` (half = 0) / `FUN_10023c70` (half = 1, 2)
+    /// (English); `FUN_1000eaa0` / `FUN_1000ec10` (Violeta, same shape): keep
+    /// at most `maxc` classes, closest first, stopping once `maxu` units are
+    /// exceeded (the class that crosses the limit is kept).
     fn limit_classes(&mut self, src: &[i32], maxc: usize, maxu: i32, label: &[u8; 7], half: u8) -> Vec<i32> {
         if src.len() <= maxc && self.sum_units(src) <= maxu {
             return src.to_vec();
         }
-        let key = class_key(label);
+        let key = self.class_key(label);
         let mut n = 0usize;
         for &c in src {
             if half == 0 && n > 9999 {
                 break;
             }
-            let d = Self::key_dist(&key, &self.cls.key[c as usize], half);
+            let d = self.key_dist(&key, &self.cls.key[c as usize], half);
             let cm = self.cm(n);
             cm.id = c;
             cm.score = d as f32;
@@ -516,9 +623,11 @@ impl<'a> Selector<'a> {
 
     // ------------------------------------------------------------- lookups
 
-    /// `FUN_10023dc0`: exact whole-phone class match, appended to list A (cap 300).
+    /// `FUN_10023dc0` (English) / `us_LookupWholeClassExact` 0x1000ed60
+    /// (Violeta, same shape once its single-iteration outer loop is
+    /// resolved): exact whole-phone class match, appended to list A (cap 300).
     fn lookup_whole(&mut self, key7: &[u8; 7]) -> i32 {
-        let k = class_key(key7);
+        let k = self.class_key(key7);
         let (first, cnt) = self.cls.find_class_range(&k, 5);
         if cnt == 0 {
             return 0;
@@ -534,19 +643,26 @@ impl<'a> Selector<'a> {
     }
 
     fn half_range(&self, key7: &[u8; 7], half: u8, plen: usize) -> Vec<i32> {
-        let hk = half_key(&class_key(key7), half);
+        let hk = half_key_lang(&self.class_key(key7), half, self.lang);
         let (first, cnt) = self.cls.find_half_range(&hk, plen);
         let m = (hk[0] != 0) as usize;
         self.cls.half_order[m][first..first + cnt].iter().map(|&c| c as i32).collect()
     }
 
-    /// `FUN_10023e70`: half-phone match with key-prefix back-off from 10 bytes.
+    /// `FUN_10023e70` (English) / `us_LookupClasses` dispatch + `FUN_1000ee10`
+    /// (Violeta): half-phone match with key-prefix back-off, starting from
+    /// the full half-key length (10 English, 11 Violeta). Violeta accepts a
+    /// range once it covers more than 2 units, not more than 9.
     fn lookup_half(&mut self, key7: &[u8; 7], t: usize, mode: i16) -> i32 {
         if self.list_a.len() > 0x121 {
             return 0;
         }
         let half = self.targets[t].half;
-        let mut plen: i32 = 10;
+        let min_units = match self.lang {
+            Lang::Eng => 9,
+            Lang::Spa => 2,
+        };
+        let mut plen: i32 = half_key_len(self.lang) as i32;
         let mut range = self.half_range(key7, half, plen as usize);
         while range.is_empty() {
             if mode != 1 && plen < 6 {
@@ -558,7 +674,7 @@ impl<'a> Selector<'a> {
         let mut got = self.limit_classes(&range, 10, 10000, key7, half);
         let mut units = self.sum_units(&got);
         loop {
-            if units > 9 || plen < 1 {
+            if units > min_units || plen < 1 {
                 break;
             }
             if mode != 1 && plen < 6 {
@@ -583,10 +699,17 @@ impl<'a> Selector<'a> {
         }
     }
 
-    /// `FUN_10018770`: context back-off lattice. Relaxes the boundary position
-    /// codes (lists at 0x1007c4dc / 0x1007c504), substitutes edge contexts, and
-    /// tries broader context / centre classes, collecting classes in list A.
+    /// `FUN_10018770` (English) / `FUN_1001f600` (Violeta): context back-off
+    /// lattice. Relaxes the boundary position codes and substitutes edge
+    /// contexts, collecting classes in list A. Violeta's version does not have
+    /// English's broader context/centre-class substitution block (no use of
+    /// `T_CTX_SUB`/`T_CENTER_SUB`/`T_BB70`/`mflag`) and does not recurse on a
+    /// centre-substituted key at the end -- confirmed by decompiling
+    /// 0x1001f600, which never references those tables.
     fn lattice(&mut self, l: &[u8; 7], t: usize, mode: i16, words: &[Word]) -> bool {
+        if self.lang == Lang::Spa {
+            return self.lattice_spa(l, t, mode, words);
+        }
         let saved = self.list_a.len();
         let tg = self.targets[t];
         let b5 = l[5];
@@ -678,6 +801,68 @@ impl<'a> Selector<'a> {
         true
     }
 
+    /// `FUN_1001f600`: Violeta's lattice, same position back-off and edge
+    /// substitution as English but without the broader-context/centre-class
+    /// block and without the final centre-substitution recursion.
+    fn lattice_spa(&mut self, l: &[u8; 7], t: usize, mode: i16, words: &[Word]) -> bool {
+        let saved = self.list_a.len();
+        let tg = self.targets[t];
+        let b5 = l[5];
+        let lb = b5 >> 7;
+        let rb = (b5 >> 6) & 1;
+        let rpos = b5 & 7;
+        let lpos = (b5 >> 3) & 7;
+        let lst = tables_spa::LEFT_POS_LISTS[(lb as usize) * 5 + lpos as usize];
+        let rst = tables_spa::RIGHT_POS_LISTS[rpos as usize + (rb as usize) * 8];
+        let word = &words[tg.word as usize];
+        let code = word.edge_code[tg.phone as usize] as i32;
+        let tens = code / 10;
+        let ones = code % 10;
+        let mut found = false;
+        for (i, &v) in lst.iter().enumerate() {
+            let (f3, a_ok) = if v == 0 { (0u8, true) } else { (lb, v == 1) };
+            let local6 = a_ok == (lpos <= 1);
+            if !(tens == 0 || local6 || tg.half == 2) {
+                continue;
+            }
+            for (j, &w) in rst.iter().enumerate() {
+                let (f5, b_ok) = if w == 0 { (0u8, true) } else { (rb, w == 1) };
+                let local7 = b_ok == (rpos <= 1);
+                if !(ones == 0 || local7 || tg.half == 1) {
+                    continue;
+                }
+                let mut key = *l;
+                let r: i32;
+                if i == 0 && j == 0 {
+                    r = self.lookup(&key, t, mode);
+                    if mode == 1 && saved == 0 && r > 0 {
+                        let nb = self.list_a.len().min(BEAM);
+                        self.list_b = self.list_a[..nb].to_vec();
+                    }
+                } else {
+                    if i > 0 && lb == 1 && v > 2 {
+                        key[0] = tbs(S_EDGE_SUB, v);
+                        key[1] = key[0];
+                    }
+                    if j > 0 && rb == 1 && w > 2 {
+                        key[3] = tbs(S_EDGE_SUB, w);
+                        key[4] = key[3];
+                    }
+                    key[5] = (((f3 * 2 + f5) * 8 + v) * 8).wrapping_add(w);
+                    r = self.lookup(&key, t, 0);
+                }
+                if (r != 0 || lb != 0 || rb != 0) && !found && r > 0 && local6 && local7 {
+                    found = true;
+                }
+            }
+        }
+        if mode != 2 && !found {
+            self.list_a.truncate(saved);
+            return false;
+        }
+        true
+    }
+
     fn sort_unique(v: &mut Vec<i32>) {
         v.sort_unstable();
         v.dedup();
@@ -730,7 +915,13 @@ impl<'a> Selector<'a> {
         if dom == 8 && units > 0 {
             return 1;
         }
-        (units > 9) as i32
+        // English (0x10024060) accepts a whole-phone match above 9 units;
+        // Violeta (0x1000f010, tail `return 2 < iVar14`) above 2.
+        let min_units = match self.lang {
+            Lang::Eng => 9,
+            Lang::Spa => 2,
+        };
+        (units > min_units) as i32
     }
 
     /// `us_LookupHalfPhones` (0x100242a0): always yields two targets.
@@ -802,7 +993,7 @@ impl<'a> Selector<'a> {
                     phone: k as u8,
                     idx: self.targets[n].idx,
                     half: self.targets[n].half,
-                    unvoiced: (tb(T_VOICED, w.ctx[k][2]) == 0) as u8,
+                    unvoiced: (self.is_voiced(w.ctx[k][2]) == 0) as u8,
                 };
                 if w.dur[k] > 0 {
                     let mut r = self.lookup_whole_phone(n, words);
@@ -958,6 +1149,9 @@ impl<'a> Selector<'a> {
 
     /// `us_TargetCost` (0x100182e0).
     fn target_cost(&self, uid: i32, t: usize, feat: &[u8; 3], w: f32, words: &[Word]) -> f32 {
+        if self.lang == Lang::Spa {
+            return self.target_cost_spa(uid, t, feat, w, words);
+        }
         let tg = self.targets[t];
         let word = &words[tg.word as usize];
         let tl = word.ctx[tg.phone as usize];
@@ -1056,6 +1250,104 @@ impl<'a> Selector<'a> {
         if self.x64 {
             // FUN_18001bc30 tail: mulss, then addss of the converted penalty.
             return cont * w + pen as f32;
+        }
+        (cont as f64 * w as f64 + pen as f32 as f64) as f32
+    }
+
+    /// `us_TargetCost` for Violeta (0x1001f1a0). Same shape as English's but,
+    /// confirmed by decompile:
+    /// - no 0x4B ("TQ") special case on a centre mismatch (just 1000/5);
+    /// - the right-context pad bonus (`tl.R1 == 0x46`, English's `0x5A`) is
+    ///   unconditional -- no `final_type == 5` gate, and no separate
+    ///   `U.R1 == TQ` check;
+    /// - the equal-centre-stress branch only has English's `U.rpos == 0 &&
+    ///   T.R1 vowel` case, not the `T.L1 vowel && T.C stressed` one;
+    /// - the unequal-centre-stress table (`S_C23C`) is indexed
+    ///   `st(U.C) + st(T.C)*2`, not `st(T.C)*3 + st(U.C)` -- Violeta's stress
+    ///   table only has two levels (no secondary stress), confirmed by
+    ///   `S_T_STRESS`'s 0/1 values and `S_T_MAPL`/`S_T_MAPR`'s stress-pairing.
+    fn target_cost_spa(&self, uid: i32, t: usize, feat: &[u8; 3], w: f32, words: &[Word]) -> f32 {
+        let tg = self.targets[t];
+        let word = &words[tg.word as usize];
+        let tl = word.ctx[tg.phone as usize];
+        let ul = self.bank.label[uid as usize];
+        let mut pen: i32 = 0;
+        if ul[2] != tl[2] {
+            pen = if tbs(S_T_COLLAPSE, ul[2]) != tbs(S_T_COLLAPSE, tl[2]) { 1000 } else { 5 };
+        }
+        if ul[1] != tl[1] && tg.half != 2 {
+            pen += if ul[5] & 0x80 == 0x80 && ul[5] & 0x38 >= 0x18 {
+                1
+            } else if tbs(S_T_COLLAPSE, ul[1]) == tbs(S_T_COLLAPSE, tl[1]) {
+                5
+            } else if tbs(S_T_BROAD, ul[1]) == tbs(S_T_BROAD, tl[1]) {
+                10
+            } else {
+                500
+            };
+        }
+        if ul[3] != tl[3] && tg.half != 1 {
+            if tl[3] == 0x46 {
+                pen += 100;
+            } else if ul[5] & 0x40 == 0x40 && ul[5] & 7 >= 3 {
+                pen += 1;
+            } else if tbs(S_T_COLLAPSE, ul[3]) == tbs(S_T_COLLAPSE, tl[3]) {
+                if tl[3] != 0x47 {
+                    pen += 5;
+                }
+            } else if tbs(S_T_BROAD, ul[3]) == tbs(S_T_BROAD, tl[3]) {
+                pen += 10;
+            } else {
+                pen += 500;
+            }
+        }
+        let urpos = ul[5] & 7;
+        let ulpos = (ul[5] >> 3) & 7;
+        pen += tis(S_POS1, (((tl[5] >> 3) & 7) as usize) * 5 + ulpos as usize)
+            + tis(S_POS2, urpos as usize + ((tl[5] & 7) as usize) * 8);
+        let st = |c: u8| tbs(S_T_STRESS, c) as usize;
+        if st(tl[2]) == st(ul[2]) {
+            if urpos == 0 && tbs(S_T_VOWEL, tl[3]) != 0 {
+                pen += tis(S_C260, st(tl[3]) * 3 + st(ul[3]));
+            }
+        } else {
+            pen += tis(S_C23C, st(ul[2]) + st(tl[2]) * 2);
+        }
+        let fdom = self.file_domain(uid);
+        if fdom == 100 {
+            pen += 10;
+        }
+        if fdom == 0x0c && word.domain != 0x0c {
+            pen += 1000;
+        }
+        let dd = self.sd.get(feat[0], self.bank.dur_code[uid as usize]);
+        let mut cont: f32;
+        if tg.unvoiced == 0 {
+            let (ka, kb) = match tg.half {
+                1 => (0usize, 1usize),
+                2 => (1, 2),
+                _ => (0, 2),
+            };
+            let b = &self.bank.bounds[uid as usize];
+            let fa = self.sd.get(feat[1], b[ka].feat_f);
+            let fb = self.sd.get(feat[2], b[kb].feat_f);
+            let mut s = (fb as f64 + fa as f64) as f32;
+            let mut d = dd;
+            if ulpos <= 1 && urpos <= 1 {
+                s = (s as f64 / rf(0x1006d174) as f64) as f32;
+            } else {
+                s = (s as f64 / rf(0x1006d180) as f64) as f32;
+                d = (d as f64 / rf(0x1006d180) as f64) as f32;
+            }
+            cont = (s as f64 + d as f64) as f32;
+        } else {
+            if ul[3] == tl[3] {
+                pen /= 2;
+            }
+            cont = (dd as f64 / rf(0x1006d184) as f64) as f32;
+        }
+        if fdom == 0x0c && word.domain == 0x0c {
+            cont = (cont as f64 / rf(0x1006d17c) as f64) as f32;
         }
         (cont as f64 * w as f64 + pen as f32 as f64) as f32
     }
@@ -1209,6 +1501,9 @@ impl<'a> Selector<'a> {
 
     /// `us_ViterbiJoinStep` (0x10018c80).
     fn join_step(&mut self, t: usize, words: &[Word]) {
+        if self.lang == Lang::Spa {
+            return self.join_step_spa(t, words);
+        }
         let cur = self.targets[t];
         let prev = self.targets[t - 1];
         let end_k: usize = if cur.half != 2 { 2 } else { 1 };
@@ -1315,6 +1610,104 @@ impl<'a> Selector<'a> {
                 if self.x64 {
                     self.scratch[k] = join / div as f32 + (tcj + self.slots[t - 1].acc[k]) + pen as f32;
                     continue;
+                }
+                let v = join as f64 / div as f32 as f64 + pen as f32 as f64;
+                let v = v + self.slots[t - 1].acc[k] as f64;
+                let v = v + tcj as f64;
+                self.scratch[k] = v as f32;
+            }
+            let best = argmin(&self.scratch[..n_prev]);
+            back[j] = best as i16;
+            acc[j] = self.scratch[best];
+        }
+        self.slots[t].acc = acc;
+        self.slots[t].back = back;
+    }
+
+    /// `us_ViterbiJoinStep` for Violeta (0x1001f9d0). The join-cost term is the
+    /// same weighted sum as English's (`S_JOIN_W` = `[wc, wf, wb]` per join
+    /// type), but summed in a different order (`cep*wc + db*wb + df*wf +
+    /// 2.0`, left to right, matching the decompiled expression exactly since
+    /// f64 addition is not associative at the last bit). The penalty term
+    /// drops English's `prev.C != cur.L1` / `prev.R1 != cur.C` (`T_C384` /
+    /// `T_CTX_SUB`) and vowel-adjacency (`T_C3E4` / `T_C444`) checks entirely
+    /// -- confirmed absent from the decompile -- leaving just the edge-flag
+    /// component (0, 1000 or `S_BFD8`) plus `S_C544` and the EXP-domain
+    /// mismatch. The right-half branch adds a partial penalty (`S_T_COLLAPSE`
+    /// match, +20) that English does not have.
+    fn join_step_spa(&mut self, t: usize, _words: &[Word]) {
+        let cur = self.targets[t];
+        let prev = self.targets[t - 1];
+        let end_k: usize = if cur.half != 2 { 2 } else { 1 };
+        let start_k: usize = (cur.half == 2) as usize;
+        let jtype: usize = if cur.unvoiced == 0 && prev.unvoiced == 0 {
+            if cur.word != prev.word { 4 } else { 0 }
+        } else if cur.unvoiced == 0 {
+            1
+        } else if prev.unvoiced == 0 {
+            2
+        } else {
+            3
+        };
+        let wc = tfs(S_JOIN_W, jtype * 3);
+        let wf = tfs(S_JOIN_W, jtype * 3 + 1);
+        let wb = tfs(S_JOIN_W, jtype * 3 + 2);
+        let two = 2.0f64;
+        let n_cur = self.slots[t].n;
+        let n_prev = self.slots[t - 1].n;
+        let mut acc = vec![0f32; n_cur];
+        let mut back = vec![0i16; n_cur];
+        let mut div: i32 = 1;
+        for j in 0..n_cur {
+            let u = self.slots[t].kept[j];
+            let ul = self.bank.label[u as usize];
+            let ub = self.bank.bounds[u as usize];
+            let lpos = (ul[5] >> 3) & 7;
+            let left_edge = ul[5] >> 7;
+            let tcj = (self.c(j).tc as f64 / two) as f32;
+            for k in 0..n_prev {
+                let p = self.slots[t - 1].kept[k];
+                let pl = self.bank.label[p as usize];
+                let pb = self.bank.bounds[p as usize];
+                let right_edge = (pl[5] >> 6) & 1;
+                let mut pen: i32 = 0;
+                let join: f32;
+                if (u == p && cur.half == 2) || (u - 1 == p && pl[6] & 0x80 != 0) {
+                    join = 0.0;
+                } else {
+                    let cep = self.cep.get(ub[start_k].cep, pb[end_k].cep);
+                    let db = self.sd.get(pb[end_k].feat_b, ub[start_k].feat_b);
+                    let df = self.sd.get(pb[end_k].feat_f, ub[start_k].feat_f);
+                    let x = cep as f64 * wc as f64 + db as f64 * wb as f64;
+                    let x = x + df as f64 * wf as f64;
+                    join = (x + two) as f32;
+                    if cur.half == 2 {
+                        pen = if p == u { 0 } else { 5 };
+                        if pl[2] != ul[2] {
+                            pen += if tbs(S_T_COLLAPSE, pl[2]) == tbs(S_T_COLLAPSE, ul[2]) { 0x14 } else { 1000 };
+                        }
+                    } else {
+                        pen = if right_edge != left_edge {
+                            1000
+                        } else if right_edge == 1 {
+                            tis(S_BFD8, lpos as usize + (pl[5] & 7) as usize * 8)
+                        } else {
+                            0
+                        };
+                    }
+                    pen += tis(S_C544, pb[end_k].class as usize * 3 + ub[start_k].class as usize);
+                    div = if cur.half == 2 || right_edge != 1 || left_edge != 1 {
+                        1
+                    } else if lpos < 3 {
+                        (lpos == 2) as i32 + 1
+                    } else {
+                        8
+                    };
+                    let pd = self.file_domain(p) == 0x0c;
+                    let ud = self.file_domain(u) == 0x0c;
+                    if pd != ud {
+                        pen += 2000;
+                    }
                 }
                 let v = join as f64 / div as f32 as f64 + pen as f32 as f64;
                 let v = v + self.slots[t - 1].acc[k] as f64;

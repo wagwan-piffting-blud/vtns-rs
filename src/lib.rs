@@ -3,13 +3,19 @@
 
 pub mod bank;
 pub mod engine;
+pub mod engine_spa;
 pub mod json;
+pub mod lang;
 pub mod lexicon;
 pub mod ling;
+pub mod ling_spa;
 pub mod phones;
 pub mod prosody;
+pub mod prosody_spa;
+pub mod prosody_tables_spa;
 pub mod shorten;
 pub mod text;
+pub mod text_spa;
 pub mod tree3;
 pub mod unitsel;
 pub mod wave;

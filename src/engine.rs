@@ -102,6 +102,9 @@ pub struct SentenceInput {
     pub map_end: Vec<i32>,
     /// `TIB+0x122440`: VTML pause after the last word of the request, -1 if none.
     pub final_pause: i32,
+    /// `tib` came from a `fedump` capture, where a word-0 pause of 0 is
+    /// ambiguous (see `resolve_word0_pause`). False for live text.
+    pub captured: bool,
 }
 
 impl SentenceInput {
@@ -119,6 +122,7 @@ impl SentenceInput {
             map_start: Vec::new(),
             map_end: Vec::new(),
             final_pause: -1,
+            captured: false,
         }
     }
 }
@@ -133,13 +137,38 @@ impl SentenceInput {
 /// (4): the last entry between a word's end and the next word's start. The
 /// pause/break cursors persist across sentences. Clamps `0x1007d66c`/`d690`.
 fn apply_tag_spans(input: &mut SentenceInput, ini: &text::initial::Initial, cursor: i32, sent_len: i32, cur: &mut [usize; 2]) {
+    let se: Vec<(i32, i32)> = (0..input.wa.n()).map(|i| (input.wa.i32(Wa::rec(i)), input.wa.i32(Wa::rec(i) + 4))).collect();
+    let out = SpanOut {
+        pitch: &mut input.pitch,
+        speed: &mut input.speed,
+        volume: &mut input.volume,
+        kind7: &mut input.kind7,
+        tib: &mut input.tib,
+        final_pause: &mut input.final_pause,
+    };
+    apply_tag_spans_core(&se, out, ini, cursor, sent_len, cur);
+}
+
+/// The per-word arrays `apply_tag_spans_core` fills.
+pub(crate) struct SpanOut<'a> {
+    pub pitch: &'a mut [i32],
+    pub speed: &'a mut [i32],
+    pub volume: &'a mut [i32],
+    pub kind7: &'a mut [i32],
+    pub tib: &'a mut Tib,
+    pub final_pause: &'a mut i32,
+}
+
+/// Shared by Violeta (`FUN_1000d840`, identical logic and clamp tables at
+/// 0x1006485c/0x10064880). `se` is each word's WA (start, end).
+pub(crate) fn apply_tag_spans_core(se: &[(i32, i32)], o: SpanOut, ini: &text::initial::Initial, cursor: i32, sent_len: i32, cur: &mut [usize; 2]) {
     const MAX: [i32; 8] = [200, 400, 500, 65535, 3, 0, 9, 9];
     const MIN: [i32; 8] = [50, 50, 0, 0, 0, 0, 0, 0];
-    let n = input.wa.n();
-    let start: Vec<i32> = (0..n).map(|i| cursor + input.wa.i32(Wa::rec(i))).collect();
-    let end: Vec<i32> = (0..n)
-        .map(|i| {
-            let (s, e) = (input.wa.i32(Wa::rec(i)), input.wa.i32(Wa::rec(i) + 4));
+    let n = se.len();
+    let start: Vec<i32> = se.iter().map(|&(s, _)| cursor + s).collect();
+    let end: Vec<i32> = se
+        .iter()
+        .map(|&(s, e)| {
             if s < e {
                 cursor + e - 1
             } else {
@@ -147,13 +176,14 @@ fn apply_tag_spans(input: &mut SentenceInput, ini: &text::initial::Initial, curs
             }
         })
         .collect();
+    let SpanOut { pitch, speed, volume, kind7, tib, final_pause } = o;
     for ch in [0usize, 1, 2, 7] {
         let c = &ini.chans[ch];
-        let arr = match ch {
-            0 => &mut input.pitch,
-            1 => &mut input.speed,
-            2 => &mut input.volume,
-            _ => &mut input.kind7,
+        let arr: &mut [i32] = match ch {
+            0 => &mut *pitch,
+            1 => &mut *speed,
+            2 => &mut *volume,
+            _ => &mut *kind7,
         };
         let (mut w, mut filled) = (0usize, 0usize);
         for k in 0..c.pos.len() {
@@ -201,24 +231,24 @@ fn apply_tag_spans(input: &mut SentenceInput, ini: &text::initial::Initial, curs
             while let Some(m) = scan(c, idx, lo, hi) {
                 idx = m + 1;
                 if ch == 3 {
-                    let p = &mut input.tib.pause[w];
+                    let p = &mut tib.pause[w];
                     *p = if first { c.val[m] } else { *p + c.val[m] };
                     *p = (*p).max(MIN[3]).min(MAX[3]);
                 } else {
-                    input.tib.brk_level[w] = c.val[m];
+                    tib.brk_level[w] = c.val[m];
                 }
                 first = false;
                 cur[ch - 3] = idx;
             }
         }
     }
-    input.final_pause = -1;
+    *final_pause = -1;
     let c = &ini.chans[3];
     if n > 0 && cursor + sent_len == ini.processed.len() as i32 {
         let mut first = true;
         while let Some(m) = scan(c, cur[0], end[n - 1], cursor + sent_len) {
-            let p = if first { c.val[m] } else { input.final_pause + c.val[m] };
-            input.final_pause = p.max(MIN[3]).min(MAX[3]);
+            let p = if first { c.val[m] } else { *final_pause + c.val[m] };
+            *final_pause = p.max(MIN[3]).min(MAX[3]);
             cur[0] = m + 1;
             first = false;
         }
@@ -254,9 +284,13 @@ fn apply_tag_spans(input: &mut SentenceInput, ini: &text::initial::Initial, curs
 /// `fedump`'s `resolve` call at all (which only ever yields 0 or fails the
 /// `p0 < 0` guard) -- it can only be a genuine span override -- so it's kept.
 /// See `tests/engine_parity.rs`'s `pause_boundary_edge_cases` (`pause_at_boundary`).
-pub fn resolve_word0_pause(tib: &mut Tib, chan: &Channel, cont: bool) {
+///
+/// Live text (`captured == false`) has no such ambiguity: unset is -1, so a
+/// `<vtml_pause time="0"/>` before the sentence's first word stays 0, as in
+/// the engine (vtns-rs issue #1).
+pub fn resolve_word0_pause(tib: &mut Tib, chan: &Channel, cont: bool, captured: bool) {
     let mut p0 = tib.pause[0];
-    if p0 <= 0 {
+    if captured && p0 == 0 {
         p0 = -1;
     }
     prosody::resolve_sentence_pause(&mut p0, -1, -1, cont, chan.sent_pause_ms);
@@ -593,7 +627,7 @@ impl Engine {
         for input in sentences {
             let Some((wa, mut ss, mut tib)) = run_ling(&self.lex, input, cursor) else { continue };
             cursor += wa.consumed();
-            resolve_word0_pause(&mut tib, &self.chan, cont);
+            resolve_word0_pause(&mut tib, &self.chan, cont, input.captured);
             run_prosody(&self.trees, &mut ss);
             self.synth_sentence(&mut sel, &ss, &tib, input, &mut cont, input.final_pause, &mut out, &mut win, &mut trace)?;
         }
@@ -715,6 +749,7 @@ pub mod capture {
             map_start: Vec::new(),
             map_end: Vec::new(),
             final_pause: -1,
+            captured: true,
         }
     }
 

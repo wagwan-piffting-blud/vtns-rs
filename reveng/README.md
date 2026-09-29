@@ -90,6 +90,8 @@ decompile/disassembly dumps used while building these notes are not part of this
 | [`PROSODY.md`](PROSODY.md) | Duration/F0/tone CART trees, syllabification's prosody-relevant fields, rate seeding, VTML span application, pause resolution, target features | **Bit-exact** |
 | [`UNITSEL.md`](UNITSEL.md) | Unit database as unit selection sees it, target building, context back-off lattice, target/join cost, Viterbi, beam pruning, `.his`/`.dtt` | **Bit-exact** |
 | [`WAVEFORM.md`](WAVEFORM.md) | Unit/pause records, Shorten decode, join smoother, OLA/PSOLA, emphasis, all output formats, word/phone sync, lip-sync log | **Bit-exact** |
+| [`VIOLETA.md`](VIOLETA.md) | Spanish engine (`vt_spa_violeta16.dll`): function map, struct layouts, letter-to-sound, lexicon/TPP, words/breaks/contexts, prosody, unit selection, wave | **Bit-exact** per stage from WA to PCM and for the initial text pass; normalizers 94.7% of records; end to end 1032/1327 WAVs identical (2026-09-29) |
+| [`OLD_PAUL.md`](OLD_PAUL.md) | The 2009 Paul build and database vs the 2014 target: builds, data formats (ver.2009 unit index, `.tree2`), function-level diff | Inventory only; not ported |
 
 Each stage doc states its own evidence tags in its header (typically `[D]` decompile/disassembly,
 `[E]`/`[C]`/`[P]` verified against captures or the port itself, `[I]` inferred) — they aren't fully

@@ -152,6 +152,15 @@ impl Record {
     }
 
     pub fn silence(len: i32, word: u16, pitch: i32, vol: i32) -> Record {
+        Self::silence_pad(len, word, pitch, vol, 0x5a)
+    }
+
+    /// As `silence`, but with the pad/silence centre byte given explicitly:
+    /// English's word-context pad code is `0x5a` ('Z'); Violeta's whole break
+    /// alphabet is shifted `-0x14` (`0x5a -> 0x46`, confirmed by
+    /// `wav_BuildUnitRecords` hardcoding `0x46` where the English build has
+    /// `0x5a`, per `reveng\VIOLETA.md`).
+    pub fn silence_pad(len: i32, word: u16, pitch: i32, vol: i32, pad: u8) -> Record {
         Record {
             pitch,
             dur: 100,
@@ -162,7 +171,7 @@ impl Record {
             word,
             w2a: -1,
             phone: 0xffff,
-            center: 0x5a,
+            center: pad,
             ..Default::default()
         }
     }
@@ -588,6 +597,14 @@ pub struct PauseState {
 
 /// `FUN_1002e890`: pause in samples before word `w` (written to `SS+8`).
 pub fn pause_before(st: &mut PauseState, words: &[WordInfo], w: usize) -> i32 {
+    pause_before_brk(st, words, w, b'Z', b'^', b'[')
+}
+
+/// As `pause_before`, with the sentence-final/exclaim, sentence-final-alt and
+/// comma break bytes given explicitly. Violeta's whole break alphabet is
+/// English's shifted `-0x14` (`0x5a/0x5e/0x5b -> 0x46/0x4a/0x47`), confirmed
+/// by `reveng\VIOLETA.md`.
+pub fn pause_before_brk(st: &mut PauseState, words: &[WordInfo], w: usize, brk_a: u8, brk_b: u8, brk_comma: u8) -> i32 {
     let p = st.word_pauses.get(w).copied().unwrap_or(-1);
     if p >= 0 {
         if w == 0 {
@@ -608,10 +625,13 @@ pub fn pause_before(st: &mut PauseState, words: &[WordInfo], w: usize) -> i32 {
         }
         return 11000;
     }
-    match words[w - 1].brk {
-        b'Z' | b'^' => 11000,
-        b'[' => st.ch_comma_ms << 4,
-        _ => 0,
+    let brk = words[w - 1].brk;
+    if brk == brk_a || brk == brk_b {
+        11000
+    } else if brk == brk_comma {
+        st.ch_comma_ms << 4
+    } else {
+        0
     }
 }
 
@@ -630,14 +650,33 @@ pub fn build_records(
     last_phrase: bool,
     st: &mut PauseState,
 ) -> Vec<Record> {
+    build_records_lang(targets, words, center, first_word, last_phrase, st, 0x5a, b'Z', b'^', b'[')
+}
+
+/// As `build_records`, with the silence/pad centre byte and the three break
+/// bytes (sentence-final, sentence-final-alt, comma) given explicitly for
+/// Violeta's shifted break alphabet.
+#[allow(clippy::too_many_arguments)]
+pub fn build_records_lang(
+    targets: &[Target],
+    words: &[WordInfo],
+    center: &dyn Fn(usize, usize) -> u8,
+    first_word: u16,
+    last_phrase: bool,
+    st: &mut PauseState,
+    pad: u8,
+    brk_a: u8,
+    brk_b: u8,
+    brk_comma: u8,
+) -> Vec<Record> {
     let mut recs: Vec<Record> = Vec::new();
     for (t, tg) in targets.iter().enumerate() {
         let boundary = if t == 0 { tg.word as u16 == first_word } else { targets[t - 1].word != tg.word };
         if boundary {
-            let pause = pause_before(st, words, tg.word as usize);
+            let pause = pause_before_brk(st, words, tg.word as usize, brk_a, brk_b, brk_comma);
             if pause > 0 {
                 let len = scaled_pause(pause, words[tg.word as usize].speed);
-                recs.push(Record::silence(len, first_word, st.ch_pitch, st.ch_volume));
+                recs.push(Record::silence_pad(len, first_word, st.ch_pitch, st.ch_volume, pad));
             }
         }
         let w = &words[tg.word as usize];
@@ -664,7 +703,7 @@ pub fn build_records(
         let prev_word = recs.last().map(|r| r.word).unwrap_or(0);
         let speed = words.get(prev_word as usize).map(|w| w.speed).unwrap_or(100);
         let len = scaled_pause(st.final_pause_ms << 4, speed);
-        recs.push(Record::silence(len, prev_word, st.ch_pitch, st.ch_volume));
+        recs.push(Record::silence_pad(len, prev_word, st.ch_pitch, st.ch_volume, pad));
     }
     recs
 }

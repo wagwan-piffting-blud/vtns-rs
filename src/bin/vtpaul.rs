@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use vtpaul::bank::Bank;
 use vtpaul::engine::{self, Engine};
+use vtpaul::engine_spa::EngineSpa;
 use vtpaul::json::Json;
 use vtpaul::wave::formats;
 use vtpaul::{phones, SAMPLE_RATE};
@@ -181,7 +182,7 @@ const CLI_USAGE: &str = "usage: vtpaul [options] [text ...]
       --comma-pause MS     pause at commas, 0..65535 (default 200)
       --emphasis N         -95..95 (default 0)
       --format F           wav (default), wav8, alaw-wav, mulaw-wav, au, pcm, alaw, mulaw, adpcm
-      --voice V            paul (default), kate, julie or james
+      --voice V            paul (default), kate, julie, james or violeta (Spanish)
       --x64                sound like the 64-bit voice DLLs (vt_pau/vt_kat/vt_jul/vt_jam.dll)
                            instead of the 32-bit vt_eng.dll; they differ on rare inputs
       --data DIR           voice data root, the folder holding data-<voice> and data-common
@@ -214,6 +215,7 @@ fn voice_dir(name: &str) -> Option<&'static str> {
         "kate" => "kate",
         "julie" | "juli" => "juli",
         "james" | "jame" => "jame",
+        "violeta" => "violeta",
         _ => return None,
     })
 }
@@ -381,13 +383,21 @@ fn cli_main(args: &[String]) {
         eprintln!("vtpaul: no voice data in {} (expected data-{}\\M16 and data-common there; see --data)", root.display(), voice);
         exit(1);
     }
-    let mut engine = Engine::open_voice(&root, voice).unwrap_or_else(|e| {
+    let open_err = |e: std::io::Error| -> ! {
         eprintln!("vtpaul: {}: {}", root.display(), e);
         exit(1)
-    });
-    engine.set_x64(x64);
-    engine.set_params(prm[0], prm[1], prm[2], prm[3], prm[4], prm[5]);
-    let (pcm, ends) = engine.speak_traced(&text).unwrap_or_else(|e| {
+    };
+    let spoken = if voice == "violeta" {
+        let mut engine = EngineSpa::open(&root).unwrap_or_else(|e| open_err(e));
+        engine.set_params(prm[0], prm[1], prm[2], prm[3], prm[4], prm[5]);
+        engine.speak_traced(&text)
+    } else {
+        let mut engine = Engine::open_voice(&root, voice).unwrap_or_else(|e| open_err(e));
+        engine.set_x64(x64);
+        engine.set_params(prm[0], prm[1], prm[2], prm[3], prm[4], prm[5]);
+        engine.speak_traced(&text)
+    };
+    let (pcm, ends) = spoken.unwrap_or_else(|e| {
         eprintln!("vtpaul: {}", e);
         exit(1)
     });

@@ -39,7 +39,7 @@ use super::tokenize::{tokenize, Tok};
 
 // ---------------------------------------------------------------- regex --
 
-enum Atom {
+pub(crate) enum Atom {
     Ch(u8),
     Set(Vec<(u8, u8)>),
     Any,
@@ -48,13 +48,13 @@ enum Atom {
     Eol,
 }
 
-struct Piece {
+pub(crate) struct Piece {
     a: Atom,
     min: usize,
     max: usize,
 }
 
-fn parse_alt(p: &[u8], i: &mut usize) -> Vec<Vec<Piece>> {
+pub(crate) fn parse_alt(p: &[u8], i: &mut usize) -> Vec<Vec<Piece>> {
     let mut alts = vec![parse_seq(p, i)];
     while *i < p.len() && p[*i] == b'|' {
         *i += 1;
@@ -130,7 +130,7 @@ fn m_rep(p: &Piece, n: usize, s: &[u8], pos: usize, k: &dyn Fn(usize) -> bool) -
     n >= p.min && k(pos)
 }
 
-fn m_seq(seq: &[Piece], s: &[u8], pos: usize, k: &dyn Fn(usize) -> bool) -> bool {
+pub(crate) fn m_seq(seq: &[Piece], s: &[u8], pos: usize, k: &dyn Fn(usize) -> bool) -> bool {
     let Some(p) = seq.first() else { return k(pos) };
     let rest = &seq[1..];
     if p.min == 1 && p.max == 1 {
@@ -155,7 +155,7 @@ fn re(idx: usize, body: &[u8]) -> bool {
 const WS: &[u8] = b" \x0c\n\r\t\x0b";
 
 /// `FUN_10024b50` (`strtok_r`) over an owned buffer: next token from `*at`.
-fn strtok<'a>(buf: &'a [u8], at: &mut usize, delims: &[u8]) -> Option<&'a [u8]> {
+pub(crate) fn strtok<'a>(buf: &'a [u8], at: &mut usize, delims: &[u8]) -> Option<&'a [u8]> {
     let n = cs(buf).len();
     let mut i = *at;
     while i < n && delims.contains(&buf[i]) {
@@ -175,7 +175,7 @@ fn strtok<'a>(buf: &'a [u8], at: &mut usize, delims: &[u8]) -> Option<&'a [u8]> 
 
 /// `FUN_1002ebf0`: the value of attribute `name` in a tag body
 /// (`name` `=` `"value"`, any delimiter run between).
-fn attr(body: &[u8], name: &[u8], delims: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn attr(body: &[u8], name: &[u8], delims: &[u8]) -> Option<Vec<u8>> {
     let mut at = 0;
     let start = loop {
         let before = at;
@@ -203,7 +203,7 @@ fn attr(body: &[u8], name: &[u8], delims: &[u8]) -> Option<Vec<u8>> {
     strtok(body, &mut at3, b"\"").map(|v| v.to_vec())
 }
 
-fn trim(w: &[u8]) -> Vec<u8> {
+pub(crate) fn trim(w: &[u8]) -> Vec<u8> {
     let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r');
     let s = cs(w);
     let a = s.iter().position(|c| !ws(c)).unwrap_or(s.len());
@@ -211,7 +211,7 @@ fn trim(w: &[u8]) -> Vec<u8> {
     s[a..b.max(a)].to_vec()
 }
 
-fn tagged(letter: u8, inner: &[u8]) -> Vec<u8> {
+pub(crate) fn tagged(letter: u8, inner: &[u8]) -> Vec<u8> {
     let mut v = b"<\xa1\xdd".to_vec();
     v.push(letter);
     v.push(b'>');
@@ -3144,7 +3144,10 @@ impl St<'_> {
                 if !re(7, &body) {
                     return None;
                 }
-                let clen = self.content(pos + total, b"</vtml_phoneme", b"</VTML_PHONEME")?;
+                // A body ending in '/' is self-closing: empty content, and the
+                // close marker follows the converted text at once.
+                let self_closing = cs(&body).last() == Some(&b'/');
+                let clen = if self_closing { 0 } else { self.content(pos + total, b"</vtml_phoneme", b"</VTML_PHONEME")? };
                 let ph = attr(&body, b"ph", delims).unwrap_or_default();
                 let alpha = if re(8, &body) { attr(&body, b"alphabet", delims).unwrap_or_default() } else { Vec::new() };
                 let word = self.src[pos + total..pos + total + clen.min(0x1ff)].to_vec();
@@ -3161,7 +3164,13 @@ impl St<'_> {
                 } else {
                     None
                 };
-                Some(self.content_tag(pos, total, clen, conv, PHON))
+                let used = self.content_tag(pos, total, clen, conv, PHON);
+                if self_closing {
+                    let m = self.span(pos, total);
+                    self.put(b"\xa2\xfe", m);
+                    self.open[PHON] = false;
+                }
+                Some(used)
             }
             H::SayAs => {
                 if empty {

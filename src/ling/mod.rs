@@ -137,6 +137,8 @@ macro_rules! byte_struct {
     };
 }
 
+pub(crate) use byte_struct;
+
 byte_struct!(Wa, WA_SIZE);
 byte_struct!(Ss, SS_SIZE);
 
