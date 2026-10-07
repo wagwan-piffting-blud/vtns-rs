@@ -1,5 +1,6 @@
 //! Abbreviation and unit-name lookup: `FUN_100437a0` (simple table lookup),
-//! `FUN_10033990` (the unit-name table used by `norm_numexpr.rs`'s `/` arm),
+//! `FUN_10033990` (the unit-name table, [`unit_lookup`], used by units,
+//! numexpr's `/` and [`fallback_b`]),
 //! `FUN_10033b70` (singular/plural rendering), `FUN_100286a0` (the first
 //! gender-fallback cascade, [`fallback_a`]) and `FUN_10033c00` (the second,
 //! [`fallback_b`]) -- both hooked into `numwords::lookahead_gender` where
@@ -9,7 +10,7 @@
 //!
 //! `FUN_100440b0`/`FUN_10044320` (the stride-`0x27`/`0x46` multi-word table
 //! matchers `fallback_a`/`fallback_b` need) are ported as
-//! [`multiword_lookup`]/[`multiword_lookup_units`], confirmed against the
+//! [`multiword_lookup`]/`unit_multiword`, confirmed against the
 //! disassembly of `FUN_100440b0` (not just its decompile, whose brace
 //! nesting around the `GROUP_0X10076AA8`-found branch is misleading -- see
 //! [`fallback_a`]'s own doc).
@@ -19,8 +20,6 @@
 //! sub-tables during engine load (confirmed live: two sub-tables each).
 //! [`group_lookup`] ports `FUN_100338b0` with its `FUN_100438f0` ('I') and
 //! `FUN_10043b20` ('S') searches over `abbrev_groups.rs`.
-//!
-//! Declined, and left out of every function below:
 
 use super::abbrev_groups::{Entry, Sub, GROUP_A, GROUP_B, GROUP_C};
 use super::abbrev_tables::{
@@ -43,7 +42,7 @@ fn strcmp_exact(a: &[u8], b: &[u8]) -> i32 {
 
 /// `FUN_100437a0`: exact-match binary search over a stride-0x27 table
 /// (`mode` 'I' = case-insensitive via `stricmp_spa`, else exact).
-fn simple_lookup(table: &[(&[u8], &[u8], u8)], word: &[u8], insensitive: bool) -> Option<usize> {
+pub(super) fn simple_lookup(table: &[(&[u8], &[u8], u8)], word: &[u8], insensitive: bool) -> Option<usize> {
     if word.is_empty() {
         return None;
     }
@@ -61,17 +60,6 @@ fn simple_lookup(table: &[(&[u8], &[u8], u8)], word: &[u8], insensitive: bool) -
         }
     }
     None
-}
-
-/// `FUN_10033990`: match `word` against the unit-name table, or (on a
-/// miss) `word` with its last byte trimmed, verified against that entry's
-/// plural suffix before accepting it as a plural. Declines (returns `None`)
-/// rather than the engine's own multi-word continuation. Delegates to
-/// `tables_oth::unit_word` (see `abbrev_tables.rs`'s doc comment for why:
-/// this used to be a second, independently-wrong reimplementation of the
-/// same engine function against a duplicate copy of the same table).
-pub fn unit_word(word: &[u8]) -> Option<Vec<u8>> {
-    super::tables_oth::unit_word(word).map(|(rendered, _fem)| rendered)
 }
 
 /// `FUN_10027e60`'s abbreviation cascade: the expansion text (if any) and
@@ -230,16 +218,15 @@ pub fn multiword_lookup(
     None
 }
 
-/// `FUN_10044320`: like [`multiword_lookup`] but specialised to the
-/// stride-`0x46` `UNIT_WORDS` (always mode `'I'`), with one extra
-/// continuation check ahead of the plain word-match: if the current
-/// candidate's plural field is a `-suffix` form, a token whose stem (via
-/// the same case rule) matches the key's remaining text and whose tail
-/// (via a plain case-insensitive `FUN_100070b0`/`stricmp_spa` compare)
-/// matches that suffix is *also* accepted as the entry's last word --
-/// this is how "kilo gramos" (plural of the two-word "kilo gramo") matches
-/// even though the table only stores the singular multi-word key.
-fn multiword_lookup_units(word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &mut i32) -> Option<usize> {
+/// `FUN_10044320(UNIT_WORDS, word, n, 'I', t+pos, off, &cursor, &plural)`:
+/// binary search where a key matching `word` over `word.len()` bytes either
+/// ends there or continues with a space into the following text (tokenized
+/// mode 0xb from `pos + cursor + 1`), word by word. A continuation token
+/// whose stem matches the rest of the key and whose tail is the entry's
+/// `-suffix` also matches and sets `plural`. A lone "\xb0" continues without
+/// the space when a letter follows it directly. `cursor` (relative to `pos`)
+/// is moved past the last matched token.
+fn unit_multiword(word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &mut i32, plural: &mut bool) -> Option<usize> {
     if word.is_empty() {
         return None;
     }
@@ -263,30 +250,30 @@ fn multiword_lookup_units(word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &
         if next == 0 {
             return Some(mid as usize);
         }
-        if next != b' ' || at(*cursor) != b' ' {
+        let degree = n == 1 && word[0] == 0xb0 && key.get(1) == Some(&b' ') && CLS_S[at(*cursor) as usize] & 0xc0 != 0;
+        if !degree && (next != b' ' || at(*cursor) != b' ') {
             hi = mid - 1;
             continue;
         }
-        let suffix: Option<&[u8]> = if pl.first() == Some(&b'-') { Some(&pl[1..]) } else { None };
+        let suffix: &[u8] = if pl.first() == Some(&b'-') { &pl[1..] } else { b"" };
         let mut rest: &[u8] = &key[n + 1..];
-        let mut c = *cursor + 1;
+        let mut c = if degree { *cursor } else { *cursor + 1 };
         let mismatch: Option<i32> = 'cont: loop {
             if at(c) == 0 {
                 break 'cont None;
             }
             let base = (pos as i64 + c as i64) as usize;
-            let (tok, consumed) = tokenize(t, base, off + c, 0xc);
+            let (tok, consumed) = tokenize(t, base, off + c, 0xb);
             if consumed == 0 || tok.class == 10 || tok.len == 0 {
                 break 'cont None;
             }
             let tlen = tok.len as usize;
-            if let Some(suf) = suffix {
-                if !suf.is_empty() && tlen > suf.len() {
-                    let stem_len = tlen - suf.len();
-                    if strnicmp_spa(rest, tok.text(), stem_len) == 0 && stricmp_spa(&tok.text()[stem_len..], suf) == 0 {
-                        *cursor = c + tok.consumed;
-                        return Some(mid as usize);
-                    }
+            if !suffix.is_empty() && tlen >= suffix.len() {
+                let stem = tlen - suffix.len();
+                if strnicmp_spa(rest, tok.text(), stem) == 0 && stricmp_spa(&tok.text()[stem..], suffix) == 0 {
+                    *cursor = c + consumed;
+                    *plural = true;
+                    return Some(mid as usize);
                 }
             }
             let cw = strnicmp_spa(rest, tok.text(), tlen);
@@ -295,48 +282,66 @@ fn multiword_lookup_units(word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &
             }
             let after = rest.get(tlen).copied().unwrap_or(0);
             if after == 0 {
-                *cursor = c + tok.consumed;
+                *cursor = c + consumed;
                 return Some(mid as usize);
             }
-            if after != b' ' || at(c + tok.consumed) != b' ' {
+            if after != b' ' || at(c + consumed) != b' ' {
                 break 'cont None;
             }
-            c += tok.consumed + 1;
+            c += consumed + 1;
             rest = &rest[tlen + 1..];
         };
         match mismatch {
-            None => hi = mid - 1,
-            Some(cw) if cw >= 0 => hi = mid - 1,
-            Some(_) => lo = mid + 1,
+            Some(cw) if cw < 0 => lo = mid + 1,
+            _ => hi = mid - 1,
         }
     }
     None
 }
 
-/// `FUN_10033990`: unit-name table gender lookup, used by `FUN_10033c00`'s
-/// fallback ([`fallback_b`]). `param_1` (the singular/plural render-out
-/// buffer) is always NULL at that call site, so the `FUN_10033b70` render
-/// branches (gated on `param_1 != 0`) are dead there and not ported --
-/// only the gender output and control flow (first try `word` as-is, then,
-/// only if that misses and `word.len() >= 4`, retry with its last 2 bytes
-/// trimmed -- a plain heuristic plural-suffix strip, ported exactly).
-fn unit_table_gender(word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &mut i32, gender: &mut u8) -> bool {
-    if let Some(idx) = multiword_lookup_units(word, t, pos, off, cursor) {
-        if UNIT_WORDS[idx].3 {
-            *gender = b'F';
-        }
-        return true;
+/// `FUN_10033990(out, word, t+pos, off, &cursor, &gender)`: the unit-name
+/// table (`DAT_10072ec8`). On a miss, `word` minus its last byte is retried
+/// (words of 3+ bytes); that hit renders the plural when the entry's
+/// `-suffix` starts with the stripped byte, else `word` itself. `out` is
+/// cleared on entry either way; `gender` only ever gets `'F'`.
+pub fn unit_lookup(
+    mut out: Option<&mut Vec<u8>>,
+    word: &[u8],
+    t: &[u8],
+    pos: usize,
+    off: i32,
+    cursor: &mut i32,
+    gender: Option<&mut u8>,
+) -> bool {
+    if let Some(o) = out.as_deref_mut() {
+        o.clear();
     }
-    if word.len() >= 4 {
-        let trimmed = &word[..word.len() - 2];
-        if let Some(idx) = multiword_lookup_units(trimmed, t, pos, off, cursor) {
-            if UNIT_WORDS[idx].3 {
-                *gender = b'F';
-            }
-            return true;
+    let mut plural = false;
+    let mut hit = unit_multiword(word, t, pos, off, cursor, &mut plural);
+    if let Some(i) = hit {
+        if let Some(o) = out.as_deref_mut() {
+            let (key, sg, pl, _) = UNIT_WORDS[i];
+            *o = render_form(plural as i16, key, sg, pl);
+        }
+    } else if word.len() >= 3 {
+        let count = word.len() - 1;
+        hit = unit_multiword(&word[..count], t, pos, off, cursor, &mut plural);
+        if let (Some(i), Some(o)) = (hit, out.as_deref_mut()) {
+            let (key, sg, pl, _) = UNIT_WORDS[i];
+            *o = if pl.first() == Some(&b'-') && pl.get(1) == Some(&word[count]) {
+                render_form(1, key, sg, pl)
+            } else {
+                word.to_vec()
+            };
         }
     }
-    false
+    let Some(i) = hit else { return false };
+    if UNIT_WORDS[i].3 {
+        if let Some(g) = gender {
+            *g = b'F';
+        }
+    }
+    true
 }
 
 /// `DAT_10082060`/`64`/`68` by slot 0/1/2. Null in the static image;
@@ -353,7 +358,7 @@ pub fn group(slot: u8) -> &'static [Sub; 2] {
 /// `FUN_100438f0(table, word, n, 'I')`: binary search where a key matches
 /// when it is a case-insensitive prefix of `word` and either ends `word` or
 /// (singular empty, plural `-suffix`) the rest of `word` equals that suffix.
-fn find_i(table: &[Entry], word: &[u8]) -> Option<usize> {
+pub(super) fn find_i(table: &[Entry], word: &[u8]) -> Option<usize> {
     if word.is_empty() {
         return None;
     }
@@ -552,7 +557,7 @@ pub fn fallback_a(t: &[u8], pos: usize, off: i32, gender: &mut u8) -> bool {
 /// `pos` (mode `0xb`); for a plain word or raw-high-byte token (class 1 or
 /// 6), tries the three runtime abbreviation groups (see [`group_lookup`],
 /// [`group`]) before falling back to the unit-name table
-/// ([`unit_table_gender`]).
+/// ([`unit_lookup`]).
 pub fn fallback_b(t: &[u8], pos: usize, off: i32, gender: &mut u8) -> bool {
     let (tok, _consumed) = tokenize(t, pos, off, 0xb);
     if tok.len == 0 {
@@ -574,5 +579,5 @@ pub fn fallback_b(t: &[u8], pos: usize, off: i32, gender: &mut u8) -> bool {
     // leading whitespace (`tok.ws>0`) this undershoots the real
     // continuation start by that many bytes. Ported as-is.
     let mut cursor = tok.len;
-    unit_table_gender(&word, t, pos, off, &mut cursor, gender)
+    unit_lookup(None, &word, t, pos, off, &mut cursor, Some(gender))
 }

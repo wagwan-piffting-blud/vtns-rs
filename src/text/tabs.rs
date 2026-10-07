@@ -65,13 +65,13 @@ impl Rec30 {
 
     /// `FUN_10056150`.
     pub fn find(&self, word: &[u8], insensitive: bool) -> i32 {
-        let va = self.va;
+        let va = table_base(self.va);
         search(self.count(), insensitive, word, |i| s(va + i as u32 * 0x30))
     }
 
     /// NUL-terminated field at `off` of record `i`.
     pub fn field(&self, i: i32, off: u32) -> &'static [u8] {
-        s(self.va + i as u32 * 0x30 + off)
+        s(table_base(self.va) + i as u32 * 0x30 + off)
     }
 }
 
@@ -92,7 +92,7 @@ impl Ptab {
     }
 
     pub fn get(&self, i: i32) -> &'static [u8] {
-        s(rd_i32(self.va + 4 * i as u32) as u32)
+        s(rd_i32(table_base(self.va) + 4 * i as u32) as u32)
     }
 
     /// `FUN_100560a0`.
@@ -119,7 +119,7 @@ impl Rec5a {
     }
 
     pub fn field(&self, i: i32, off: u32) -> &'static [u8] {
-        s(self.va + i as u32 * 0x5a + off)
+        s(table_base(self.va) + i as u32 * 0x5a + off)
     }
 
     /// `FUN_10056210`: the key is a prefix of `word` and the rest is empty or
@@ -234,7 +234,7 @@ impl Rec66 {
     }
 
     pub fn field(&self, i: i32, off: u32) -> &'static [u8] {
-        s(self.va + i as u32 * 0x66 + off)
+        s(table_base(self.va) + i as u32 * 0x66 + off)
     }
 
     /// `FUN_10056370`: exact key match only (used for the ISO-code table).
@@ -316,7 +316,7 @@ impl PtabN {
         if i < 0 || i >= self.n {
             return b"";
         }
-        let p = rd_i32(self.va + 4 * i as u32) as u32;
+        let p = rd_i32(table_base(self.va) + 4 * i as u32) as u32;
         if p == 0 {
             b""
         } else {

@@ -37,22 +37,8 @@
 //! the previous WA record's `rec::SRC == 7` and `rec::END` matching the
 //! looked-back word's own end -- no code path in this port ever emits
 //! `SRC == 7`, and guessing which one the engine's fuller `FUN_100494c0`/
-//! render pipeline uses it for risks a wrong, unverifiable fold); what
-//! `FUN_100491d0`'s bare-`/` continuation does after speaking "barra" and
-//! setting `param_1[4] = 1` -- byte offset 8 of the same WA/FE pointer as
-//! `TAG_MODE`, so a tempting guess, but wiring it to `tagmode::tag_mode`
-//! (whose own doc comment already expected a URL normalizer to do exactly
-//! this) does NOT reproduce the engine: a capture of
-//! "http://example.com/index.html ..." shows the engine ending the SENTENCE
-//! right after "barra" and starting a fresh one at "index.html" (matched
-//! by `url()` itself again, as "index"/"punto"/"html"), whereas routing
-//! through this port's existing `tag_mode()` instead speaks "index.html" as
-//! one joined word and keeps the same sentence going -- so whatever
-//! `param_1[4] = 1` actually drives here is NOT this codebase's `TAG_MODE`
-//! (or `tag_mode()` itself has a pre-existing gap for a word.word path
-//! piece); left unset, declining a path/query string after the first bare
-//! `/` (matching everything up to and including that `/`, then falling
-//! through) rather than guess further; `port_continuation`'s own RENDER (`FUN_100490a0`'s tail, speaking
+//! render pipeline uses it for risks a wrong, unverifiable fold);
+//! `port_continuation`'s own RENDER (`FUN_100490a0`'s tail, speaking
 //! `FUN_1004ca30`'s output over the port number's span) -- `FUN_1004ca30`
 //! IS `numwords::cardinal_to_words` (re-derived from its own disassembly,
 //! matching the existing port bit-for-bit: plain digits, no comma/period
@@ -67,11 +53,16 @@
 //! "http://.../path" and "host.com:port" (port detected but left for the
 //! chain to read on its own, exactly as before this round) are unaffected by
 //! any of these -- confirmed against engine captures.
+//!
+//! Both the scheme path and the general capture end in `FUN_100491d0`
+//! (`url_continuation`). A bare `/` there is spoken "barra" and sets
+//! `WA+8` (`TAG_MODE`): the driver ends the sentence and `tagmode.rs` spells
+//! each following path segment as its own sentence.
 
 use super::emit;
 use super::spell;
 use super::tokenize::{tokenize, Tok};
-use super::FeSpa;
+use super::{FeSpa, TAG_MODE};
 use crate::ling_spa::lexicon::stricmp_spa;
 use crate::ling_spa::WaSpa;
 use crate::text::cstr::{at, atoi};
@@ -370,6 +361,7 @@ fn url_continuation(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], p: usize, off: i32, st
                 if spell::expand(fe, wa, text, tok.start, tok.end, b'D') == 0 {
                     return 0;
                 }
+                wa.set_i16(TAG_MODE, 1);
                 return total + r;
             }
             default_case = b'D';
@@ -543,7 +535,8 @@ pub fn url(fe: &FeSpa, wa: &mut WaSpa, _tok: &mut Tok, t: &[u8], p: usize, off: 
             if !render(fe, wa, &entries[..count]) {
                 return 0;
             }
-            return entries[count - 1].pos_after - off;
+            let used = entries[count - 1].pos_after - off;
+            return url_continuation(fe, wa, t, p + used as usize, off + used, used);
         }
     }
     -1

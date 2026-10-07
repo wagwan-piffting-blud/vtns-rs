@@ -1,138 +1,201 @@
-//! `FUN_1002b410` (chain slot 2): dates.
+//! `FUN_1002b410` (chain slot 2): dates. Up to six entries are classified
+//! (mode-3 tokens), each with a shape letter (`local_228`) and a role
+//! (`local_210`):
+//! - 'O' "de"/"del", 'T' "el", 'I' a leading "en", 'S' "AC"/"DC" (shape = role),
+//! - 'w' a weekday abbreviation and 'W' a full weekday (shape 'W'),
+//! - 'A' a month abbreviation and 'F' a full month (shape 'M'),
+//! - numbers (shape 'N'): role 'N', 'Y' (4-digit or "'97" year), 'D' (an
+//!   ordinal-suffixed day), or a day/year list or range collapsed into one
+//!   "DAYS" entry (`FUN_1002dc20`/`FUN_1002dd40`, role 'D' or 'Y').
 //!
-//! Ported this pass: the classify loop (`FUN_1002b410` itself, minus the
-//! multi-token day+month/day+year span lookahead -- see below), the 20-shape
-//! pattern match, the D/M/Y resolve switch (`FUN_1002c8e0`) for shapes 0-0x10,
-//! the fully-ambiguous 3-number cascade (`FUN_1002d4c0`, simplified -- see
-//! [`cascade_dmy`]'s doc), and the emit switch (`FUN_1002bf10`).
-//!
-//! ## Corrections to the previous pass's map (verified against the decompile
-//! and, where dense, the disassembly/memory reads this pass)
-//! - `'O'` is **not** a generic "unrecognized word" fallback: it is emitted
-//!   *only* for "de"/"del" (`DAT_100686c0`/`DAT_10069168`). `'T'` is "el"
-//!   (`DAT_100686bc`) -- the previous doc had these two swapped. A genuinely
-//!   unrecognized word (anything not de/del/el/en/AC-DC/weekday/month) fails
-//!   `FUN_1002d8b0`'s digit-or-ordinal-suffix gate and simply **stops** the
-//!   classify loop (falls to the shape-match tail with whatever entries
-//!   exist so far) -- it is not a role at all.
-//! - `'S'` is the AC/DC-era-marker match (`DAT_1006915c`/`10069158`/
-//!   `10069154`/`10069150` = "AC"/"A.C"/"DC"/"D.C"), not a season table --
-//!   there is no season table. The two weekday tables are `0x1006a510`
-//!   (14 entries, abbrev-or-full key -> full name value, stride 0x27,
-//!   binary search; role `'w'` lowercase) and `PTR_s_Domingo_1006a734`
-//!   (7 pointers to the 7 full names themselves, alphabetically sorted;
-//!   role `'W'` uppercase). Both are emitted identically (verbatim literal).
-//! - `FUN_100505b3` is a plain `atoi` on the whole string; its first
-//!   ("this") argument is decorative everywhere it is called with one
-//!   (confirmed from `FUN_1002da80`, where the day *value* -- not the
-//!   *length* -- is range-checked). Consequently `FUN_1002bf10`'s "day
-//!   ordinal when `FUN_100505b3(..)==1`" is a check on the day's **numeric
-//!   value**, not its text length: only day 1 gets the ordinal "primero"
-//!   (correct Spanish -- "el primero de enero" but "el dos de enero").
-//! - `FUN_100259c0` (used for role `'F'`, a full month name matched
-//!   literally) is a **lowercase** fold (ASCII + Latin-1 accented-uppercase
-//!   pairs, three CP1252 exceptions shifted by `+0x10`, the rest by
-//!   `+0x20`), not an uppercase fold -- verified from its own decompile
-//!   (`DAT_10065564`-style ASCII fold, then the CP1252 accented-uppercase
-//!   shift table). It normalizes "Septiembre"/"SEPTIEMBRE" to "septiembre".
-//!
-//! ## Declined / simplified, precisely
-//! - `FUN_1002dc20`/`FUN_1002dd40` (the multi-token day-list/day-range span
-//!   lookahead that would collapse e.g. "27, 28 y 29" or "27 al 30" into
-//!   one entry) are **not ported this pass either** -- the classify loop
-//!   never attempts them, so a digit run always falls through to plain
-//!   per-token classification. This does not affect the numeric
-//!   (`27/09/2026`, `27-09-2026`, `9/27/26`) or `de`-mediated
-//!   (`27 de septiembre de 2026`) shapes -- confirmed by tracing both
-//!   through the real per-token path -- only a bare day-list/day-range
-//!   collapses differently (falls back to ordinary token-by-token
-//!   classification instead of one merged span entry). This round read
-//!   both functions in full (not just referenced) and their own
-//!   *algorithms* are now understood precisely:
-//!   - `FUN_1002dc20` (day-list, "27, 28 y 29"): given an entry that is
-//!     role `'N'` (an unresolved digit run, i.e. the entry's original
-//!     tokenize class was `2`) and a valid day (`FUN_1002da80`), requires
-//!     the token right after it to be a lone `,` (len 1, `ws<2`); then
-//!     loops alternating "expect a day" / "expect a separator (`,` or
-//!     `y`)", where a `y`-separator switches the *next* required day into
-//!     "this one ends the list" mode (returning the position right after
-//!     it), any length/`ws>1`/wrong-character check failing the whole
-//!     thing (`-1`), and running out of text before a `y`-terminated day
-//!     also declining.
-//!   - `FUN_1002dd40` (day range, "27 al 30" / "27-30" / "27/30"): given a
-//!     valid-day entry, tries a literal connector token (`a`/`y`/`&`, or
-//!     the word "al" via a full-string compare) then a second valid day;
-//!     failing that, tries a symbol connector (`-`, `/`, or the CP1252
-//!     en/em-dash bytes `0x96`/`0x97`) then a second valid day, with an
-//!     extra check that a *third* occurrence of one of `-/.`
-//!     (`DAT_1006916c`) right after doesn't also look like a second range
-//!     (declining if so, to avoid mis-parsing "27-30-31" as one range).
-//!   Neither function's *caller-side* integration was attempted this
-//!   pass: splicing either into `classify`'s loop needs tracing
-//!   `FUN_1002b410`'s own ~500-line control flow (not yet read in full)
-//!   to find the exact insertion point and the corresponding "merged
-//!   span" emit path (there is no shape in [`PATTERNS`] for a 3+ day
-//!   list, so a real port needs its own dedicated emit, not
-//!   [`emit_date`]) -- a documented decline on the integration, not the
-//!   algorithms themselves.
-//! - `FUN_1002d910` (apostrophe-year, `'97`) is **not** reachable from
-//!   `classify`'s own per-token loop and so is not ported: `'` is itself one
-//!   of `tokenize`'s `SYMBOLS` characters, so "'97" always tokenizes as two
-//!   separate tokens ("'" then "97"), never the combined text
-//!   `FUN_1002d910` expects. The bare `'` token then fails
-//!   `FUN_1002d8b0`'s gate (it is not a digit and, at length 1, does not
-//!   qualify for the gate's own apostrophe exemption, which requires length
-//!   >= 2) and stops the loop -- confirmed against the decompile, not
-//!   guessed. `FUN_1002d9b0` (ordinal-suffix value, "1ro"/"8vo") is left
-//!   declining (`-1` always) -- it depends on `FUN_1004dd60`, not ported in
-//!   `numwords.rs`. Per `FUN_1002d8b0`'s own gate, this decline only bites a
-//!   digit run that actually has a non-digit suffix (i.e. the tokenizer's
-//!   own ordinal-suffix join already fired) -- it correctly falls through
-//!   for plain digits without ever calling it.
-//! - `FUN_1002d2b0` (the weekday-adjacency lookahead that sets `weekdayFlag`
-//!   for patterns 9/0xe/0x11/0x12/0x13) is **not ported**; `weekday_flag` is
-//!   hardcoded `false`. This is a no-op for pattern 9 (the flag only gates a
-//!   redundant fast-path -- see [`resolve`]'s case 9) and for pattern 0xe's
-//!   two-number D/M-vs-M/D branch (only reachable when `weekday_flag!=0`).
-//!   Patterns 0x11/0x12 (a bare month/weekday alone) still succeed
-//!   unconditionally for a *full-name* match (`'F'`/`'W'`) -- the engine's
-//!   own gate there checks the entry's role for `'A'`/`'w'` specifically
-//!   (the abbreviation-capable tables), not the pattern's shape, so only
-//!   those two narrower sub-cases need `weekday_flag` and decline here.
-//!   Pattern 0x13 (a bare number alone) always needs it and always
-//!   declines.
-//! - The "period right after an abbreviated month/weekday, absorb into the
-//!   previous entry" special case (`sept.` in "sept. 27") is ported for the
-//!   branch this family's probe corpus exercises (peek token present, valid,
-//!   with ws in {0,1}); the nested `LAB_1002b670` re-entry after the
-//!   `else if` body's own sub-checks collapses to "not absorbed" rather than
-//!   re-running the outer gate a second time -- flagged in [`classify`].
-//! - The "weekday name followed immediately by a comma" shape continuation
-//!   (b410's `0 < iVar14 && local_228[.]=='W' && ...`) is not ported; a bare
-//!   comma after a weekday simply stops the loop like any other
-//!   unrecognized token (graceful, not a hard decline).
-//!
-//! Sources: `C:\tmp\vtwork\v4\decomp\1002b410.c`, `1002bf10.c`, `1002c8e0.c`,
-//! `1002c6e0.c` (unused -- span-only, see above), `1002d4c0.c`, `1002d8b0.c`,
-//! `1002d910.c`, `1002d9b0.c`, `1002da80.c`, `1002db30.c`, `1002dad0.c`,
-//! `1002e0c0.c`, plus memory reads off `vt_spa_violeta16.dll` for the month
-//! abbreviation table (`0x10069f90`, 24 entries), full month name table
-//! (`0x1006a338`, 12 entries), spoken month words (`PTR_DAT_10069f58`,
-//! index 1-12), weekday tables (`0x1006a510` 14 entries / `0x1006a734` 7
-//! pointers), the 20 `PTR_s_WNOMON_10069098` shape strings, and the small
-//! filler/marker string constants cited inline below.
+//! Separators "/-.," between entries are kept on the previous entry; a '.'
+//! after an abbreviation is absorbed into it. The shape string is matched
+//! against `PTR_s_WNOMON_10069098` from the longest prefix down; the first
+//! candidate `FUN_1002c8e0` resolves is written by `FUN_1002bf10` (src 3).
 
-use super::numwords::{cardinal_to_words, ordinal_word_1_20};
+use super::norm_units::{best_and_last, phrase_find};
+use super::numwords::{cardinal_to_words, ordinal_suffix_classify, ordinal_word_1_20};
+use super::punct::prev_words;
 use super::tables::{CLS_S, HI};
 use super::tokenize::{tokenize, Tok};
 use super::{emit, emit::emit_split, FeSpa};
 use crate::ling_spa::lexicon::stricmp_spa;
 use crate::ling_spa::WaSpa;
 
+const SRC: u32 = 3;
+
+/// `DAT_10069148`: the text of a collapsed list/range entry.
+const DAYS: &[u8] = b"DAYS";
+/// `DAT_100686c0`.
+const DE: &[u8] = b"de";
+/// `DAT_100686bc`.
+const EL: &[u8] = b"el";
+
+/// `0x10069f90` (`DAT_10079dc4` = 24): month abbreviation, month number.
+const MONTH_ABBR: [(&[u8], &[u8]); 24] = [
+    (b"AB", b"4"),
+    (b"ABR", b"4"),
+    (b"AG", b"8"),
+    (b"AGO", b"8"),
+    (b"DI", b"12"),
+    (b"DIC", b"12"),
+    (b"ENE", b"1"),
+    (b"FB", b"2"),
+    (b"FEB", b"2"),
+    (b"JL", b"7"),
+    (b"JN", b"6"),
+    (b"JUL", b"7"),
+    (b"JUN", b"6"),
+    (b"MAR", b"3"),
+    (b"MAY", b"5"),
+    (b"MR", b"3"),
+    (b"MY", b"5"),
+    (b"NO", b"11"),
+    (b"NOV", b"11"),
+    (b"OC", b"10"),
+    (b"OCT", b"10"),
+    (b"SEP", b"9"),
+    (b"SEPT", b"9"),
+    (b"SP", b"9"),
+];
+
+/// `0x1006a338` (`DAT_10079dc8` = 12): full month names.
+const MONTH_FULL: [&[u8]; 12] = [
+    b"ABRIL",
+    b"AGOSTO",
+    b"DICIEMBRE",
+    b"ENERO",
+    b"FEBRERO",
+    b"JULIO",
+    b"JUNIO",
+    b"MARZO",
+    b"MAYO",
+    b"NOVIEMBRE",
+    b"OCTUBRE",
+    b"SEPTIEMBRE",
+];
+
+/// `PTR_DAT_10069f58`, by month number.
+const MONTH_WORD: [&[u8]; 13] = [
+    b"",
+    b"Enero",
+    b"Febrero",
+    b"Marzo",
+    b"Abril",
+    b"Mayo",
+    b"Junio",
+    b"Julio",
+    b"Agosto",
+    b"Septiembre",
+    b"Octubre",
+    b"Noviembre",
+    b"Diciembre",
+];
+
+/// `0x1006a510` (`DAT_10079dcc` = 14): weekday abbreviation, full name.
+const WEEKDAY_ABBR: [(&[u8], &[u8]); 14] = [
+    (b"Do", b"Domingo"),
+    (b"Dom", b"Domingo"),
+    (b"Ju", b"Jueves"),
+    (b"Jue", b"Jueves"),
+    (b"Lu", b"Lunes"),
+    (b"Lun", b"Lunes"),
+    (b"Ma", b"Martes"),
+    (b"Mar", b"Martes"),
+    (b"Mi", b"Mi\xe9rcoles"),
+    (b"Mie", b"Mi\xe9rcoles"),
+    (b"Sa", b"S\xe1bado"),
+    (b"Sab", b"S\xe1bado"),
+    (b"Vi", b"Viernes"),
+    (b"Vie", b"Viernes"),
+];
+
+/// `PTR_s_Domingo_1006a734` (`DAT_10079dd0` = 7).
+const WEEKDAY: [&[u8]; 7] = [b"Domingo", b"Jueves", b"Lunes", b"Martes", b"Mi\xe9rcoles", b"S\xe1bado", b"Viernes"];
+
+/// viol09 `PTR_DAT_10066088` (`DAT_10075734` = 31): the same list without "desde".
+const DATE_CONTEXT_09: [&[u8]; 31] = [
+    b"a.c",
+    b"ac",
+    b"antes de cristo",
+    b"ayer",
+    b"a\xf1o",
+    b"cumplea\xf1os",
+    b"d.c",
+    b"dc",
+    b"despues de cristo",
+    b"domingo",
+    b"duraci\xf3n",
+    b"era",
+    b"\xe9poca",
+    b"fecha",
+    b"feriada",
+    b"feriado",
+    b"fiesta",
+    b"hoy",
+    b"jornada",
+    b"jueves",
+    b"lunes",
+    b"ma\xf1ana",
+    b"martes",
+    b"mi\xe9rcoles",
+    b"periodo",
+    b"per\xedodo",
+    b"periodos",
+    b"per\xedodos",
+    b"s\xe1bado",
+    b"siglo",
+    b"viernes",
+];
+
+/// `PTR_DAT_1006a750` (`DAT_10079dd4` = 32): words that make a bare number
+/// or weekday a date (`FUN_1002d2b0`).
+const DATE_CONTEXT: [&[u8]; 32] = [
+    b"a.c",
+    b"ac",
+    b"antes de cristo",
+    b"ayer",
+    b"a\xf1o",
+    b"cumplea\xf1os",
+    b"d.c",
+    b"dc",
+    b"desde",
+    b"despues de cristo",
+    b"domingo",
+    b"duraci\xf3n",
+    b"era",
+    b"\xe9poca",
+    b"fecha",
+    b"feriada",
+    b"feriado",
+    b"fiesta",
+    b"hoy",
+    b"jornada",
+    b"jueves",
+    b"lunes",
+    b"ma\xf1ana",
+    b"martes",
+    b"mi\xe9rcoles",
+    b"periodo",
+    b"per\xedodo",
+    b"periodos",
+    b"per\xedodos",
+    b"s\xe1bado",
+    b"siglo",
+    b"viernes",
+];
+
+/// `PTR_s_WNOMON_10069098` (`DAT_100690e8` = 20).
+const PATTERNS: [&[u8]; 20] = [
+    b"WNOMON", b"WTNOM", b"NOMON", b"WNMN", b"WNOM", b"WMNN", b"NMN", b"NOM", b"MNN", b"NNN", b"WNM", b"NM", b"IN",
+    b"MN", b"NN", b"SN", b"NS", b"M", b"W", b"N",
+];
+
 fn digit(c: u8) -> bool {
     CLS_S[c as usize] & 0x10 != 0
 }
 
+/// `FUN_1004b600`.
 fn all_digits(s: &[u8]) -> bool {
     !s.is_empty() && s.iter().all(|&c| digit(c))
 }
@@ -141,21 +204,31 @@ fn eqi(a: &[u8], b: &[u8]) -> bool {
     stricmp_spa(a, b) == 0
 }
 
-/// `atoi` (`FUN_100505b3`, decorative first arg dropped -- see module doc).
+/// `FUN_100505b3`: C `atoi`.
 fn atoi(s: &[u8]) -> i32 {
-    let mut v: i32 = 0;
-    for &c in s {
-        if !digit(c) {
-            break;
-        }
-        v = v.wrapping_mul(10).wrapping_add((c - b'0') as i32);
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
     }
-    v
+    let neg = i < s.len() && s[i] == b'-';
+    if i < s.len() && (s[i] == b'-' || s[i] == b'+') {
+        i += 1;
+    }
+    let mut v: i32 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        v = v.wrapping_mul(10).wrapping_add((s[i] - b'0') as i32);
+        i += 1;
+    }
+    if neg {
+        v.wrapping_neg()
+    } else {
+        v
+    }
 }
 
-/// `FUN_1002da80`: valid day -- all-digit, 1-2 chars, value 1..=31.
+/// `FUN_1002da80`: a day, 1..31 in one or two digits.
 fn valid_day(s: &[u8]) -> i32 {
-    if !all_digits(s) || s.is_empty() || s.len() > 2 {
+    if !all_digits(s) || s.len() > 2 {
         return -1;
     }
     let v = atoi(s);
@@ -166,9 +239,9 @@ fn valid_day(s: &[u8]) -> i32 {
     }
 }
 
-/// `FUN_1002dad0`: valid month-as-number -- all-digit, 1-2 chars, 1..=12.
-fn valid_month_num(s: &[u8]) -> i32 {
-    if !all_digits(s) || s.is_empty() || s.len() > 2 {
+/// `FUN_1002dad0`: a month number, 1..12 in one or two digits.
+fn valid_month(s: &[u8]) -> i32 {
+    if !all_digits(s) || s.len() > 2 {
         return -1;
     }
     let v = atoi(s);
@@ -179,91 +252,77 @@ fn valid_month_num(s: &[u8]) -> i32 {
     }
 }
 
-/// `FUN_1002db30(text, 0)`: valid year -- all-digit; 2 chars -> 0..99;
-/// 3 chars -> 100..999; 4 chars -> 1000..9999; 5+ chars -> no leading `0`,
-/// value >= 10000. (Modes 1/2 are never called from this subtree.)
+/// `FUN_1002db30(s, 0)`: a year of 2, 3 or 4 digits, or 5+ digits from
+/// 10000 without a leading zero.
 fn valid_year(s: &[u8]) -> i32 {
-    if !all_digits(s) {
-        return -1;
-    }
     let n = s.len();
-    if n < 2 {
+    let v = atoi(s);
+    if !all_digits(s) || n < 2 {
         return -1;
     }
-    let v = atoi(s);
-    if n == 2 {
-        return if (0..100).contains(&v) { v } else { -1 };
-    }
-    if n == 3 {
-        return if (100..1000).contains(&v) { v } else { -1 };
-    }
-    if n == 4 && v > 999 {
-        return v;
+    match n {
+        2 if (0..100).contains(&v) => return v,
+        3 if (100..1000).contains(&v) => return v,
+        4 if v > 999 => return v,
+        _ => {}
     }
     if s[0] == b'0' || v < 10000 {
+        -1
+    } else {
+        v
+    }
+}
+
+/// `FUN_1002d9b0`: a day with an ordinal suffix ("1ro", "8vo").
+fn ordinal_day(s: &[u8]) -> i32 {
+    let n = s.len();
+    if n == 0 || n >= 5 {
         return -1;
     }
-    v
-}
-
-/// `FUN_1002e0c0`: year value-text to words. `0` -> "dos mil"; `1..=9` ->
-/// "dos mil " + cardinal (avoids the ungrammatical "dos mil, cero, uno");
-/// else plain `cardinal_to_words` (a bare 2-digit year like "26" therefore
-/// reads as just "veintiséis", with no century prefix at all -- a genuine
-/// engine asymmetry, kept as-is).
-fn year_to_words(out: &mut Vec<u8>, text: &[u8]) {
-    let v = atoi(text);
-    if v < 0 {
-        return;
+    let Some((code, _)) = ordinal_suffix_classify(s) else { return -1 };
+    let strip = match code {
+        1 | 2 => 1,
+        3 | 4 => 2,
+        5 | 6 => 3,
+        _ => return -1,
+    };
+    if n < strip {
+        return -1;
     }
-    if v == 0 {
-        out.extend_from_slice(b"dos mil");
-        return;
-    }
-    if v < 10 {
-        out.extend_from_slice(b"dos mil");
-        let mut word = Vec::new();
-        cardinal_to_words(&mut word, text, 0);
-        out.push(b' ');
-        out.extend_from_slice(&word);
-        return;
-    }
-    cardinal_to_words(out, text, 0);
-}
-
-/// `FUN_1002bf10`'s day reading: ordinal "primero" only for value 1 (see
-/// module doc's `FUN_100505b3` correction), else cardinal.
-fn day_words(out: &mut Vec<u8>, text: &[u8]) {
-    if atoi(text) == 1 {
-        ordinal_word_1_20(out, 1, 0);
+    let v = atoi(&s[..n - strip]);
+    if v > 0 && v < 0x20 {
+        v
     } else {
-        cardinal_to_words(out, text, 0);
+        -1
     }
 }
 
-/// `FUN_1002d9b0`: ordinal-suffix numeric-value reader ("1ro"->1, "8vo"->8).
-/// **Declined** -- depends on `FUN_1004dd60`, not ported (see `numwords.rs`).
-fn ordinal_suffix_value(_s: &[u8]) -> i32 {
-    -1
-}
-
-/// `FUN_1002d8b0`: every character is a digit, except a token starting with
-/// `'` (length >= 2) may have that leading apostrophe -- else the whole
-/// token must be a valid ordinal-suffixed number (declined, see above).
-fn ordinal_gate(s: &[u8]) -> bool {
-    let n = s.len() as i32;
+/// `FUN_1002d8b0`: digits (a leading apostrophe allowed), or an ordinal day.
+fn number_gate(s: &[u8]) -> bool {
+    let n = s.len();
     for (i, &c) in s.iter().enumerate() {
-        let exempt = i == 0 && n >= 2 && c == b'\'';
-        if !digit(c) && !exempt {
-            return ordinal_suffix_value(s) >= 0;
+        if !digit(c) && (i != 0 || n < 2 || s[0] != b'\'') {
+            return ordinal_day(s) >= 0;
         }
     }
     true
 }
 
-/// `FUN_100259c0`: lowercase fold -- ASCII uppercase (`+0x20`), three CP1252
-/// exceptions (`0x8a`/`0x8e`/`0x9f` -> `+0x10`, `0xff` fixed), else any other
-/// Latin-1 accented-uppercase byte (`HI[..]&0x80`) also `+0x20`.
+/// `FUN_1002d910`: "'97" or a four-digit year starting 1-9.
+fn year_form(s: &[u8]) -> i32 {
+    if s.first() == Some(&b'\'') {
+        if s.len() == 3 && digit(s[1]) && digit(s[2]) {
+            return atoi(&s[1..]);
+        }
+        return -1;
+    }
+    if s.len() == 4 && (b'1'..=b'9').contains(&s[0]) && digit(s[1]) && digit(s[2]) && digit(s[3]) {
+        return atoi(s);
+    }
+    -1
+}
+
+/// `FUN_100259c0`: lowercase fold (ASCII, and Latin-1 uppercase letters).
 fn fold_lower(text: &[u8]) -> Vec<u8> {
     text.iter()
         .map(|&b| {
@@ -274,11 +333,7 @@ fn fold_lower(text: &[u8]) -> Vec<u8> {
                     b
                 }
             } else if matches!(b, 0x8a | 0x8e | 0x9f) {
-                if b == 0xff {
-                    0xff
-                } else {
-                    b + 0x10
-                }
+                b + 0x10
             } else {
                 b.wrapping_add(0x20)
             }
@@ -286,586 +341,905 @@ fn fold_lower(text: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// `0x10069f90`, stride 0x27, 24 entries (`DAT_10079dc4`): month
-/// abbreviation -> month number (both the 2- and 3-letter forms).
-const MONTH_ABBR: &[(&[u8], u8)] = &[
-    (b"AB", 4), (b"ABR", 4), (b"AG", 8), (b"AGO", 8), (b"DI", 12), (b"DIC", 12), (b"ENE", 1), (b"FB", 2), (b"FEB", 2),
-    (b"JL", 7), (b"JN", 6), (b"JUL", 7), (b"JUN", 6), (b"MAR", 3), (b"MAY", 5), (b"MR", 3), (b"MY", 5), (b"NO", 11),
-    (b"NOV", 11), (b"OC", 10), (b"OCT", 10), (b"SEP", 9), (b"SEPT", 9), (b"SP", 9),
-];
+/// `FUN_100437a0` / `FUN_10043680` in mode 'I'.
+fn search<T>(table: &[T], key: impl Fn(&T) -> &[u8], word: &[u8]) -> Option<usize> {
+    if word.is_empty() {
+        return None;
+    }
+    let (mut lo, mut hi) = (0i32, table.len() as i32 - 1);
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let c = stricmp_spa(key(&table[mid as usize]), word);
+        if c == 0 {
+            return Some(mid as usize);
+        }
+        if c < 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    None
+}
 
-/// `0x1006a338`, stride 0x27, 12 entries (`DAT_10079dc8`): full month name
-/// -> month number.
-const MONTH_FULL: &[(&[u8], u8)] = &[
-    (b"ABRIL", 4), (b"AGOSTO", 8), (b"DICIEMBRE", 12), (b"ENERO", 1), (b"FEBRERO", 2), (b"JULIO", 7), (b"JUNIO", 6),
-    (b"MARZO", 3), (b"MAYO", 5), (b"NOVIEMBRE", 11), (b"OCTUBRE", 10), (b"SEPTIEMBRE", 9),
-];
+fn c0(tok: &Tok) -> u8 {
+    tok.text[0]
+}
 
-/// `PTR_DAT_10069f58`, index 1-12 (index 0 unused -- points at an empty
-/// string): the spoken month word.
-const MONTH_WORD: [&[u8]; 13] =
-    [b"", b"Enero", b"Febrero", b"Marzo", b"Abril", b"Mayo", b"Junio", b"Julio", b"Agosto", b"Septiembre", b"Octubre", b"Noviembre", b"Diciembre"];
-
-/// `0x1006a510`, stride 0x27, 14 entries (`DAT_10079dcc`): weekday key
-/// (abbreviated or full, case-insensitive) -> full proper-cased name.
-/// Role `'w'` (lowercase).
-const WEEKDAY_FULL: &[(&[u8], &[u8])] = &[
-    (b"Do", b"Domingo"), (b"Dom", b"Domingo"), (b"Ju", b"Jueves"), (b"Jue", b"Jueves"), (b"Lu", b"Lunes"), (b"Lun", b"Lunes"),
-    (b"Ma", b"Martes"), (b"Mar", b"Martes"), (b"Mi", b"Mi\xe9rcoles"), (b"Mie", b"Mi\xe9rcoles"), (b"Sa", b"S\xe1bado"),
-    (b"Sab", b"S\xe1bado"), (b"Vi", b"Viernes"), (b"Vie", b"Viernes"),
-];
-
-/// `PTR_s_Domingo_1006a734`, 7 pointers (`DAT_10079dd0`), alphabetically
-/// sorted, each both the search key and the value. Role `'W'` (uppercase).
-const WEEKDAY_SHORT: &[&[u8]] = &[b"Domingo", b"Jueves", b"Lunes", b"Martes", b"Mi\xe9rcoles", b"S\xe1bado", b"Viernes"];
-
-/// `PTR_s_WNOMON_10069098`, the 20 pattern shapes, index = pattern index
-/// used throughout `resolve`/`emit_date`/`cascade_dmy`.
-const PATTERNS: [&[u8]; 20] = [
-    b"WNOMON", b"WTNOM", b"NOMON", b"WNMN", b"WNOM", b"WMNN", b"NMN", b"NOM", b"MNN", b"NNN", b"WNM", b"NM", b"IN", b"MN", b"NN", b"SN", b"NS",
-    b"M", b"W", b"N",
-];
-
-/// The pattern-index range to try for a given entry count (b410's tail
-/// switch on `iVar14`; `DAT_100690e8` = 20 for the count-1 upper bound).
-fn pattern_range(count: usize) -> Option<(usize, usize)> {
-    match count {
-        6 => Some((0, 1)),
-        5 => Some((1, 3)),
-        4 => Some((3, 6)),
-        3 => Some((6, 11)),
-        2 => Some((11, 17)),
-        1 => Some((17, 20)),
-        _ => None,
+/// `FUN_1002dc20(tok, t+p, off)`: "27, 28 y 29"; the bytes to the last day.
+fn day_list(tok: &Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    if tok.class != 2 || valid_day(tok.text()) < 0 {
+        return -1;
+    }
+    let mut i = tok.consumed;
+    let (nt, c) = tokenize(t, p + i as usize, off + i, 3);
+    if c == 0 || c0(&nt) != b',' || nt.len != 1 || nt.ws >= 2 {
+        return -1;
+    }
+    let mut state = 1u8;
+    i += c;
+    if t[p + i as usize] == 0 {
+        return -1;
+    }
+    loop {
+        let (nt, c) = tokenize(t, p + i as usize, off + i, 3);
+        if c == 0 {
+            return -1;
+        }
+        if state != 0 && valid_day(nt.text()) >= 0 && nt.ws <= 1 {
+            if state == 2 {
+                return i + c;
+            }
+            state = 0;
+        } else {
+            if state != 0 || (c0(&nt) != b',' && c0(&nt) != b'y') || nt.len != 1 || nt.ws > 1 {
+                return -1;
+            }
+            state = if c0(&nt) != b',' { 2 } else { 1 };
+        }
+        i += c;
+        if t[p + i as usize] == 0 {
+            return -1;
+        }
     }
 }
 
+fn word_conj(nt: &Tok) -> bool {
+    ((matches!(c0(nt), b'a' | b'y' | b'&') && nt.len == 1) || eqi(nt.text(), b"al")) && nt.ws < 2
+}
+
+fn dash(c: u8) -> bool {
+    matches!(c, b'-' | b'/' | 0x96 | 0x97)
+}
+
+/// `FUN_1002dd40(tok, t+p, off, &year, &day)`: "27 al 30", "27-30",
+/// "1990-1995"; the bytes to the second day or year.
+fn day_range(tok: &Tok, t: &[u8], p: usize, off: i32, year: &mut bool, day: &mut bool) -> i32 {
+    if tok.class != 2 {
+        return -1;
+    }
+    let at = |i: i32| tokenize(t, p + i as usize, off + i, 3);
+    let mut i = tok.consumed;
+    if valid_day(tok.text()) >= 0 {
+        let (nt, c) = at(i);
+        if c == 0 {
+            return -1;
+        }
+        if word_conj(&nt) {
+            i += c;
+            let (n2, c2) = at(i);
+            if c2 == 0 || valid_day(n2.text()) < 0 || n2.ws > 1 {
+                return -1;
+            }
+            return i + c2;
+        }
+        let d = c0(&nt);
+        if dash(d) && nt.len == 1 {
+            i += c;
+            let (n2, c2) = at(i);
+            if c2 != 0 && valid_day(n2.text()) >= 0 && n2.ws < 2 {
+                i += c2;
+                let (n3, c3) = at(i);
+                if n3.class == 3 && n3.len == 1 {
+                    if c0(&n3) == d {
+                        return -1;
+                    }
+                    if c0(&n3) != 0 && b"-/.".contains(&c0(&n3)) {
+                        let (n4, _) = at(i + c3);
+                        if n4.class == 2 && n4.ws < 2 {
+                            return -1;
+                        }
+                    }
+                }
+                *day = true;
+                return i;
+            }
+        }
+        return -1;
+    }
+    if valid_year(tok.text()) < 0 {
+        return -1;
+    }
+    let (nt, c) = at(i);
+    if c == 0 {
+        return -1;
+    }
+    if word_conj(&nt) {
+        i += c;
+        let (n2, c2) = at(i);
+        if c2 == 0 || valid_year(n2.text()) < 0 || n2.ws > 1 {
+            return -1;
+        }
+        *year = true;
+        return i + c2;
+    }
+    let d = c0(&nt);
+    if !dash(d) || nt.len != 1 {
+        return -1;
+    }
+    i += c;
+    let (n2, c2) = at(i);
+    if c2 == 0 || valid_year(n2.text()) < 0 || n2.ws > 1 {
+        return -1;
+    }
+    i += c2;
+    let (n3, _) = at(i);
+    if n3.class == 3 && n3.len == 1 && c0(&n3) == d {
+        return -1;
+    }
+    *year = true;
+    i
+}
+
+/// `FUN_1002d2b0(t+p0, off0, 'B', consumed)`: a date context word among the
+/// two words before or the three tokens after, unless the word right before
+/// is "en".
+fn date_context(t: &[u8], p0: usize, off0: i32, consumed: i32, era09: bool) -> bool {
+    let mut left: Vec<Vec<u8>> = Vec::new();
+    let (w, back) = prev_words(t, p0 - off0 as usize, p0, 2);
+    if back != 0 {
+        let (best, last) = best_and_last(&w, off0 - back as i32, 3);
+        if last.len > 0 {
+            left.push(last.text().to_vec());
+            if best.len > 0 {
+                left.push(best.text().to_vec());
+            }
+        }
+    }
+    let mut right: Vec<Vec<u8>> = Vec::new();
+    let mut q = p0 + consumed as usize;
+    let mut o = off0 + consumed;
+    while right.len() < 3 {
+        let (tk, c) = tokenize(t, q, o, 3);
+        if c == 0 || tk.class == 9 || tk.class == 10 {
+            break;
+        }
+        q += c as usize;
+        o += c;
+        right.push(tk.text().to_vec());
+    }
+    if left.first().is_some_and(|w| eqi(w, b"en")) {
+        return false;
+    }
+    let table: &[&[u8]] = if era09 { &DATE_CONTEXT_09 } else { &DATE_CONTEXT };
+    phrase_find(table, &left, 2) || phrase_find(table, &right, 3)
+}
+
+/// One entry (0x140 bytes each in the WA scratch area).
 #[derive(Clone, Default)]
-struct DateEntry {
+struct Ent {
     ws: i32,
     start: i32,
     end: i32,
+    len: i32,
+    class: i32,
     role: u8,
-    /// Raw token text (also the role-`'D'`/`'M'`/`'Y'` numeric value text
-    /// once resolved -- entries never lose their original digit text).
+    /// +0x1e: a '.' was absorbed.
+    dot: i16,
+    /// +0x20: the separator that followed.
+    sep: i16,
+    /// +0x24: text position after the entry ("DAYS": its start).
+    pos: usize,
     text: Vec<u8>,
-    /// The literal spoken/verbatim text for roles `'w'`/`'W'`/`'S'`/`'A'`/`'F'`
-    /// (unused for `'D'`/`'M'`/`'Y'`/`'I'`/`'O'`/`'T'`, which derive their
-    /// output from `text` or their role alone at emit time).
     word: Vec<u8>,
 }
 
-/// `FUN_1002b410`'s classify loop (up to its shape-match tail, handled by
-/// [`date`] itself). Builds up to 6 entries and their shape string; the loop
-/// always terminates gracefully into the tail rather than hard-declining
-/// (mirroring `goto LAB_1002bd87` everywhere in the original).
-fn classify(t: &[u8], p0: usize, off0: i32) -> Vec<DateEntry> {
-    let mut entries: Vec<DateEntry> = Vec::new();
-    let mut sub_role: Vec<u8> = Vec::new();
-    let mut pending_sep: i32 = -1;
-    let mut sep_count = 0i32;
-    let (mut p, mut off) = (p0, off0);
-
-    'main: loop {
-        if entries.len() >= 6 {
-            break;
+/// `FUN_1002c8e0(entries, shape, pattern, context)`.
+fn resolve(e: &mut [Ent], shape: &mut [u8], k: usize, ctx: bool) -> bool {
+    let mut open = 0;
+    for (i, s) in shape.iter_mut().enumerate().take(e.len()) {
+        if *s == b'N' {
+            if e[i].role == b'N' {
+                open += 1;
+            } else {
+                *s = e[i].role;
+            }
         }
-        let (tok, consumed) = tokenize(t, p, off, 3);
-        if consumed == 0 || tok.class == 10 {
-            break;
-        }
-        let text = tok.text().to_vec();
-        let cur_idx = sub_role.len() as i32;
-
-        // Lone date-separator token ("/", "-", ".", ",").
-        if pending_sep == -1 && tok.len == 1 && !text.is_empty() && b"/-.,".contains(&text[0]) {
-            let mut absorb = false;
-            if text[0] == b'.' && tok.ws == 0 && cur_idx > 0 && matches!(sub_role[cur_idx as usize - 1], b'A' | b'w') {
-                let (peek, _) = tokenize(t, p + consumed as usize, off + consumed, 3);
-                if peek.len > 0 {
-                    if peek.ws < 1 {
-                        absorb = peek.len == 1 && matches!(peek.text().first(), Some(b',') | Some(b'/'));
-                    } else if peek.ws > 1 || !ordinal_gate(peek.text()) {
-                        // `LAB_1002b670` re-entry after this branch's own
-                        // checks is simplified to "not absorbed" -- see the
-                        // module doc.
-                        absorb = peek.ws > 0 && peek.len < 2 && eqi(peek.text(), b"el");
-                    } else {
-                        absorb = true;
-                    }
+    }
+    let day = |e: &[Ent], i: usize| valid_day(&e[i].text) >= 0;
+    let mon = |e: &[Ent], i: usize| valid_month(&e[i].text) >= 0;
+    let year = |e: &[Ent], i: usize| valid_year(&e[i].text) >= 0;
+    // `iVar2 == 2` day+year at (a, b), `iVar2 == 1` whichever is still open.
+    let dy = |e: &mut [Ent], shape: &[u8], a: usize, b: usize| -> Option<bool> {
+        if open == 2 {
+            if day(e, a) {
+                if !year(e, b) {
+                    return Some(false);
                 }
+                e[a].role = b'D';
+                e[b].role = b'Y';
+                return Some(true);
             }
-            if absorb {
-                if let Some(last) = entries.last_mut() {
-                    last.end += 1;
-                }
-                sub_role.push(text[0]);
-                p += consumed as usize;
-                off += consumed;
-                continue 'main;
+            None
+        } else if open == 1 {
+            if (shape[a] == b'D' && year(e, b)) || (shape[b] == b'Y' && day(e, a)) {
+                e[a].role = b'D';
+                e[b].role = b'Y';
+                return Some(true);
             }
-            if cur_idx == 0 || sep_count > 2 {
-                break;
-            }
-            sub_role.push(text[0]);
-            sep_count += 1;
-            pending_sep = cur_idx;
-            p += consumed as usize;
-            off += consumed;
-            continue 'main;
-        }
-
-        let start = tok.start;
-        let end = off + consumed;
-        let role;
-        let mut word: Vec<u8> = Vec::new();
-
-        if eqi(&text, b"de") || eqi(&text, b"del") {
-            role = b'O';
-        } else if eqi(&text, b"el") {
-            role = b'T';
-        } else if cur_idx == 0 && eqi(&text, b"en") {
-            role = b'I';
-        } else if eqi(&text, b"AC") || eqi(&text, b"A.C") || eqi(&text, b"DC") || eqi(&text, b"D.C") {
-            role = b'S';
-            // Literal-case check on the raw text (not the case-insensitive
-            // match above) -- ported exactly, including the quirk that a
-            // lowercase "ac"/"a.c" therefore gets the "DC" word instead.
-            word = if text.first() == Some(&b'A') { b"AC".to_vec() } else { b"DC".to_vec() };
-        } else if let Some(&(_, full)) = WEEKDAY_FULL.iter().find(|&&(k, _)| eqi(k, &text)) {
-            role = b'w';
-            word = full.to_vec();
-        } else if let Some(&full) = WEEKDAY_SHORT.iter().find(|&&k| eqi(k, &text)) {
-            role = b'W';
-            word = full.to_vec();
-        } else if let Some(&(_, num)) = MONTH_ABBR.iter().find(|&&(k, _)| eqi(k, &text)) {
-            role = b'A';
-            word = MONTH_WORD[num as usize].to_vec();
-        } else if MONTH_FULL.iter().any(|&(k, _)| eqi(k, &text)) {
-            role = b'F';
-            word = fold_lower(&text);
-        } else if ordinal_gate(&text) {
-            // All-digit text trivially passes the gate (see `ordinal_gate`);
-            // a token with a genuine ordinal suffix also reaches here and
-            // is declined by the gate itself (`ordinal_suffix_value`) --
-            // handled by the `else` arm below in that case.
-            role = b'N';
+            None
         } else {
-            // Unrecognized word, or a digit run with an ordinal suffix
-            // (declined): stop the loop, matching every `goto LAB_1002bd87`
-            // the real engine takes here.
-            break;
+            Some(open < 1)
         }
-
-        if pending_sep != -1 {
-            if pending_sep + 1 != cur_idx {
-                break;
-            }
-            pending_sep = -1;
-        }
-        sub_role.push(role);
-        entries.push(DateEntry { ws: tok.ws, start, end, role, text, word });
-        p += consumed as usize;
-        off += consumed;
-    }
-    entries
-}
-
-/// `FUN_1002d4c0`, simplified: its only caller (`resolve`'s case 9) always
-/// invokes it with all three entries still ambiguous (`param_2` = "NNN"),
-/// which makes every one of the function's earlier `*param_2==role` gated
-/// shortcuts unreachable dead code (they require a position already
-/// resolved, which never happens before this call in this port -- see the
-/// module doc for why the span lookahead that could pre-resolve one is not
-/// ported). What remains is the final, unconditional priority cascade:
-/// D-M-Y, then Y-M-D, then M-D-Y.
-fn cascade_dmy(e: &mut [DateEntry; 3]) -> bool {
-    if valid_day(&e[0].text) >= 0 && valid_month_num(&e[1].text) >= 0 && valid_year(&e[2].text) >= 0 {
-        e[0].role = b'D';
-        e[1].role = b'M';
-        e[2].role = b'Y';
-        return true;
-    }
-    if valid_year(&e[0].text) >= 0 && valid_month_num(&e[1].text) >= 0 && valid_day(&e[2].text) >= 0 {
-        e[0].role = b'Y';
-        e[1].role = b'M';
-        e[2].role = b'D';
-        return true;
-    }
-    if valid_month_num(&e[0].text) >= 0 && valid_day(&e[1].text) >= 0 && valid_year(&e[2].text) >= 0 {
-        e[0].role = b'M';
-        e[1].role = b'D';
-        e[2].role = b'Y';
-        return true;
-    }
-    false
-}
-
-/// `FUN_1002c8e0`: resolve the ambiguous `'N'` entries' roles for the
-/// matched pattern. `weekday_flag` is always `false` in this port (see
-/// module doc) -- cases 9 and 0xe degrade gracefully; 0x11/0x12 only
-/// decline for their `'A'`/`'w'` sub-case; 0x13 always declines.
-fn resolve(entries: &mut [DateEntry], pattern_idx: usize, weekday_flag: bool) -> bool {
-    let n = entries.len();
-    match pattern_idx {
+    };
+    match k {
         0 => {
-            // "WNOMON": ambiguous at 1 and 5.
-            if valid_day(&entries[1].text) >= 0 && valid_year(&entries[5].text) >= 0 {
-                entries[1].role = b'D';
-                entries[5].role = b'Y';
-                return true;
+            if open == 2 {
+                if day(e, 1) && year(e, 5) {
+                    e[1].role = b'D';
+                    e[5].role = b'Y';
+                    return true;
+                }
+                false
+            } else if open == 1 {
+                if (shape[1] == b'D' && year(e, 5)) || (shape[5] == b'Y' && day(e, 1)) {
+                    e[1].role = b'D';
+                    e[5].role = b'Y';
+                    return true;
+                }
+                false
+            } else {
+                open < 1
             }
-            false
         }
         1 => {
-            // "WTNOM": ambiguous at 2 only -- role 'D'.
-            if valid_day(&entries[2].text) >= 0 {
-                entries[2].role = b'D';
+            if open == 1 {
+                if !day(e, 2) {
+                    return false;
+                }
+                e[2].role = b'D';
                 return true;
             }
-            false
+            open < 1
         }
-        2 => {
-            // "NOMON": ambiguous at 0 and 4.
-            if valid_day(&entries[0].text) >= 0 && valid_year(&entries[4].text) >= 0 {
-                entries[0].role = b'D';
-                entries[4].role = b'Y';
-                return true;
-            }
-            false
-        }
-        3 => {
-            // "WNMN": ambiguous at 1 and 3.
-            if valid_day(&entries[1].text) >= 0 && valid_year(&entries[3].text) >= 0 {
-                entries[1].role = b'D';
-                entries[3].role = b'Y';
-                return true;
-            }
-            false
-        }
-        4 | 10 => {
-            // "WNOM" / "WNM": ambiguous at 1 only -- role 'D'.
-            if valid_day(&entries[1].text) >= 0 {
-                entries[1].role = b'D';
-                return true;
-            }
-            false
-        }
-        5 => {
-            // "WMNN": ambiguous at 2 and 3.
-            if valid_day(&entries[2].text) >= 0 && valid_year(&entries[3].text) >= 0 {
-                entries[2].role = b'D';
-                entries[3].role = b'Y';
-                return true;
-            }
-            false
-        }
+        2 => dy(e, shape, 0, 4).unwrap_or(false),
+        3 => dy(e, shape, 1, 3).unwrap_or(false),
+        5 => dy(e, shape, 2, 3).unwrap_or(false),
         6 => {
-            // "NMN": ambiguous at 0 and 2, either D..Y or Y..D order.
-            if valid_day(&entries[0].text) >= 0 && valid_year(&entries[2].text) >= 0 {
-                entries[0].role = b'D';
-                entries[2].role = b'Y';
-                return true;
+            if open == 2 {
+                if day(e, 0) && year(e, 2) {
+                    e[0].role = b'D';
+                    e[2].role = b'Y';
+                    return true;
+                }
+                if year(e, 0) {
+                    if !day(e, 2) {
+                        return false;
+                    }
+                    e[0].role = b'Y';
+                    e[2].role = b'D';
+                    return true;
+                }
+                false
+            } else if open == 1 {
+                if (shape[0] == b'D' && year(e, 2)) || (shape[2] == b'Y' && day(e, 0)) {
+                    e[0].role = b'D';
+                    e[2].role = b'Y';
+                    return true;
+                }
+                if (shape[0] == b'Y' && day(e, 2)) || (shape[2] == b'D' && year(e, 0)) {
+                    e[0].role = b'Y';
+                    e[2].role = b'D';
+                    return true;
+                }
+                false
+            } else {
+                open < 1
             }
-            if valid_year(&entries[0].text) >= 0 && valid_day(&entries[2].text) >= 0 {
-                entries[0].role = b'Y';
-                entries[2].role = b'D';
-                return true;
-            }
-            false
         }
-        7 | 11 => {
-            // "NOM" / "NM": ambiguous at 0 only -- role 'D'.
-            if valid_day(&entries[0].text) >= 0 {
-                entries[0].role = b'D';
+        7 | 0xb => {
+            if open != 1 {
+                return open < 1;
+            }
+            if day(e, 0) {
+                e[0].role = b'D';
                 return true;
             }
             false
         }
         8 => {
-            // "MNN": ambiguous at 1 and 2.
-            if valid_day(&entries[1].text) >= 0 && valid_year(&entries[2].text) >= 0 {
-                entries[1].role = b'D';
-                entries[2].role = b'Y';
-                return true;
+            if open == 2 {
+                if !day(e, 1) {
+                    if !year(e, 2) {
+                        return false;
+                    }
+                    e[1].role = b'D';
+                    e[2].role = b'Y';
+                    return true;
+                }
+                false
+            } else if open == 1 {
+                if (shape[1] == b'D' && year(e, 2)) || (shape[2] == b'Y' && day(e, 1)) {
+                    e[1].role = b'D';
+                    e[2].role = b'Y';
+                    return true;
+                }
+                false
+            } else {
+                open < 1
             }
-            false
         }
         9 => {
-            // "NNN": the fully-ambiguous cascade. The engine's own
-            // `param_1[0x52]!=param_1[0xa2]` gate compares entries 1 and 2's
-            // `ws` fields (whitespace-before counts); ported literally.
-            if entries[1].ws != entries[2].ws {
+            if e[1].ws != e[2].ws {
                 return false;
             }
-            let mut e3: [DateEntry; 3] = [entries[0].clone(), entries[1].clone(), entries[2].clone()];
-            if !cascade_dmy(&mut e3) {
+            if !cascade(e, shape) {
                 return false;
             }
-            entries[0].role = e3[0].role;
-            entries[1].role = e3[1].role;
-            entries[2].role = e3[2].role;
-            true
+            if ctx || !cascade(e, shape) {
+                return true;
+            }
+            matches!(e[0].sep, 0x2f | 0x2d) || matches!(e[1].sep, 0x2f | 0x2d)
         }
-        0xc => {
-            // "IN": ambiguous at 1 only -- role 'Y' ("en <year>").
-            if valid_year(&entries[1].text) >= 0 {
-                entries[1].role = b'Y';
+        4 | 0xa => {
+            if open != 1 {
+                return open < 1;
+            }
+            if day(e, 1) {
+                e[1].role = b'D';
                 return true;
             }
             false
         }
         0xd => {
-            // "MN": try year first, else day.
-            if valid_year(&entries[1].text) >= 0 {
-                entries[1].role = b'Y';
+            if open != 1 {
+                return open < 1;
+            }
+            if year(e, 1) {
+                e[1].role = b'Y';
                 return true;
             }
-            if valid_day(&entries[1].text) >= 0 {
-                entries[1].role = b'D';
+            if day(e, 1) {
+                e[1].role = b'D';
                 return true;
             }
             false
         }
         0xe => {
-            // "NN": both ambiguous, no separating filler. Only reachable
-            // (per the engine) with weekday_flag != 0 -- always false here.
-            let _ = n;
-            if !weekday_flag {
+            if !ctx {
                 return false;
             }
-            if valid_year(&entries[0].text) >= 0 && valid_month_num(&entries[1].text) >= 0 {
-                entries[0].role = b'Y';
-                entries[1].role = b'M';
-                return true;
+            let set = |e: &mut [Ent], a: u8, b: u8| {
+                e[0].role = a;
+                e[1].role = b;
+                true
+            };
+            if open == 2 {
+                if year(e, 0) && mon(e, 1) {
+                    return set(e, b'Y', b'M');
+                }
+                if mon(e, 0) && year(e, 1) {
+                    return set(e, b'M', b'Y');
+                }
+                if day(e, 0) && mon(e, 1) {
+                    return set(e, b'D', b'M');
+                }
+                if mon(e, 0) && day(e, 1) {
+                    return set(e, b'M', b'D');
+                }
+                false
+            } else if open == 1 {
+                let days = |e: &[Ent], i: usize| e[i].text.as_slice() == DAYS;
+                if shape[0] == b'Y' && !days(e, 0) && mon(e, 1) {
+                    return set(e, b'Y', b'M');
+                }
+                if year(e, 0) && shape[1] == b'M' {
+                    return set(e, b'Y', b'M');
+                }
+                if (shape[0] == b'M' && year(e, 1)) || (mon(e, 0) && shape[1] == b'Y' && !days(e, 1)) {
+                    return set(e, b'M', b'Y');
+                }
+                if (shape[0] == b'D' && !days(e, 0) && mon(e, 1)) || (day(e, 0) && shape[1] == b'M') {
+                    return set(e, b'D', b'M');
+                }
+                if !(shape[0] == b'M' && day(e, 1)) && !(mon(e, 0) && shape[1] == b'D' && !days(e, 1)) {
+                    return false;
+                }
+                set(e, b'M', b'D')
+            } else {
+                open < 1 && e[0].role != e[1].role
             }
-            if valid_month_num(&entries[0].text) >= 0 && valid_year(&entries[1].text) >= 0 {
-                entries[0].role = b'M';
-                entries[1].role = b'Y';
-                return true;
-            }
-            if valid_day(&entries[0].text) >= 0 && valid_month_num(&entries[1].text) >= 0 {
-                entries[0].role = b'D';
-                entries[1].role = b'M';
-                return true;
-            }
-            if valid_month_num(&entries[0].text) >= 0 && valid_day(&entries[1].text) >= 0 {
-                entries[0].role = b'M';
-                entries[1].role = b'D';
-                return true;
-            }
-            false
         }
-        0xf => {
-            // "SN": ambiguous at 1 only -- role 'Y'.
-            if valid_year(&entries[1].text) >= 0 {
-                entries[1].role = b'Y';
+        0xc | 0xf => {
+            if open == 1 {
+                if !year(e, 1) {
+                    return false;
+                }
+                e[1].role = b'Y';
                 return true;
             }
-            false
+            open < 1
         }
         0x10 => {
-            // "NS": ambiguous at 0 only -- role 'Y'.
-            if valid_year(&entries[0].text) >= 0 {
-                entries[0].role = b'Y';
+            if open != 1 {
+                return open < 1;
+            }
+            if year(e, 0) {
+                e[0].role = b'Y';
                 return true;
             }
             false
         }
-        0x11 => {
-            // "M": a bare month alone. Only an *abbreviated* match
-            // (`'A'`) needs `weekday_flag` (always declines here); a full
-            // month name (`'F'`) succeeds unconditionally -- the engine's
-            // own gate checks `role0=='A'` specifically, not the shape.
-            entries[0].role != b'A'
+        0x11 | 0x12 => {
+            let abbr = e[0].role == if k == 0x11 { b'A' } else { b'w' };
+            !abbr || (e[0].len > 2 && ctx && e[0].dot != 0)
         }
-        0x12 => {
-            // "W": a bare weekday alone; mirrors 0x11 with `role0=='w'`
-            // (the lowercase, abbreviation-capable table) vs `'W'` (the
-            // alphabetically-sorted full-name-only table, which always
-            // succeeds).
-            entries[0].role != b'w'
-        }
-        // 0x13 "N": a bare number alone always needs weekday_flag --
-        // always declines in this port.
+        0x13 => ctx && shape[0] == b'Y',
         _ => false,
     }
 }
 
-/// `FUN_1002bf10`'s "joined" fast path (`LAB_1002c2e6`), used for patterns
-/// 6/9/0xe once every entry is D/M/A/F/Y (always true here -- see module
-/// doc): reads day/month/year into three word buffers and emits them in
-/// entry order with an inserted literal "de" after the day and month parts,
-/// regardless of what separators the original text used.
-fn emit_joined(wa: &mut WaSpa, entries: &[DateEntry]) -> i32 {
-    let mut day_w = Vec::new();
-    let mut month_w = Vec::new();
-    let mut year_w = Vec::new();
-    for e in entries {
-        match e.role {
-            b'D' => day_words(&mut day_w, &e.text),
-            b'M' => {
-                let v = atoi(&e.text) as usize;
-                if v < MONTH_WORD.len() {
-                    month_w.extend_from_slice(MONTH_WORD[v]);
+/// `FUN_1002d4c0`: D/M/Y for three numbers, trying D-M-Y, Y-M-D, then M-D-Y.
+fn cascade(e: &mut [Ent], s: &[u8]) -> bool {
+    let (t0, t1, t2) = (e[0].text.clone(), e[1].text.clone(), e[2].text.clone());
+    let set = |e: &mut [Ent], a: u8, b: u8, c: u8| {
+        e[0].role = a;
+        e[1].role = b;
+        e[2].role = c;
+        true
+    };
+    let (d0, m1, y2) = (valid_day(&t0) >= 0, valid_month(&t1) >= 0, valid_year(&t2) >= 0);
+    if s[0] == b'D' && ((m1 && y2) || (m1 && s[2] == b'Y') || (s[1] == b'M' && y2)) {
+        return set(e, b'D', b'M', b'Y');
+    }
+    if (d0 && s[1] == b'M' && s[2] == b'Y') || (d0 && s[1] == b'M' && y2) || (d0 && m1 && s[2] == b'Y') {
+        return set(e, b'D', b'M', b'Y');
+    }
+    let (y0, d2) = (valid_year(&t0) >= 0, valid_day(&t2) >= 0);
+    if s[0] == b'Y' && ((m1 && d2) || (m1 && s[2] == b'D') || (s[1] == b'M' && d2)) {
+        return set(e, b'Y', b'M', b'D');
+    }
+    if (y0 && s[1] == b'M' && s[2] == b'D') || (y0 && s[1] == b'M' && d2) || (y0 && m1 && s[2] == b'D') {
+        return set(e, b'Y', b'M', b'D');
+    }
+    let (d1, m0) = (valid_day(&t1) >= 0, valid_month(&t0) >= 0);
+    if s[0] == b'M' && ((d1 && y2) || (d1 && s[2] == b'Y') || (s[1] == b'D' && y2)) {
+        return set(e, b'M', b'D', b'Y');
+    }
+    if (m0 && s[1] == b'D' && s[2] == b'Y') || (m0 && s[1] == b'D' && y2) || (m0 && d1 && s[2] == b'Y') {
+        return set(e, b'M', b'D', b'Y');
+    }
+    if d0 && m1 && y2 {
+        return set(e, b'D', b'M', b'Y');
+    }
+    if y0 && m1 && d2 {
+        return set(e, b'Y', b'M', b'D');
+    }
+    if m0 && d1 && y2 {
+        return set(e, b'M', b'D', b'Y');
+    }
+    false
+}
+
+/// `FUN_1002e0c0`: a year, "dos mil" prefixed below 10.
+fn year_words(out: &mut Vec<u8>, text: &[u8]) {
+    let v = atoi(text);
+    if v < 0 {
+        return;
+    }
+    if v == 0 {
+        out.extend_from_slice(b"dos mil");
+        return;
+    }
+    if v < 10 {
+        let mut w = Vec::new();
+        cardinal_to_words(&mut w, text, 0);
+        out.extend_from_slice(b"dos mil ");
+        out.extend_from_slice(&w);
+        return;
+    }
+    cardinal_to_words(out, text, 0);
+}
+
+/// `FUN_1002bf10`'s day: "primero" for 1, else the cardinal.
+fn day_words(out: &mut Vec<u8>, text: &[u8]) {
+    if atoi(text) == 1 {
+        ordinal_word_1_20(out, 1, 0);
+    } else {
+        cardinal_to_words(out, text, 0);
+    }
+}
+
+fn month_words(e: &Ent) -> Vec<u8> {
+    if e.class == 1 {
+        return e.word.clone();
+    }
+    let v = atoi(&e.text);
+    MONTH_WORD.get(v as usize).copied().unwrap_or(b"").to_vec()
+}
+
+/// `FUN_1002c6e0(wa, entry, 0)`: a "DAYS" entry, one word per token.
+fn emit_days(wa: &mut WaSpa, t: &[u8], e: &Ent) -> bool {
+    let span = e.end - e.start;
+    let mut pos = e.pos;
+    let mut o = e.start;
+    let mut done = 0;
+    while done < span {
+        let (sub, r) = tokenize(t, pos, o, 3);
+        let ok = match sub.class {
+            2 => {
+                let mut w = Vec::new();
+                if e.role == b'D' && atoi(sub.text()) == 1 {
+                    ordinal_word_1_20(&mut w, 1, 0);
+                } else {
+                    cardinal_to_words(&mut w, sub.text(), 0);
                 }
+                emit_split(wa, &w, sub.start, sub.end, b'D', b'D', SRC)
             }
-            b'A' | b'F' => month_w.extend_from_slice(&e.word),
-            b'Y' => year_to_words(&mut year_w, &e.text),
+            1 => emit(wa, sub.text(), sub.start, sub.end, b'A', b'D', SRC, None),
+            3 => match c0(&sub) {
+                b'-' => emit(wa, b"a", sub.start, sub.end, b'A', b'D', SRC, None),
+                b'/' | b'&' => emit(wa, b"y", sub.start, sub.end, b'A', b'D', SRC, None),
+                _ => true,
+            },
+            6 if matches!(c0(&sub), 0x96 | 0x97) => emit(wa, b"a", sub.start, sub.end, b'A', b'D', SRC, None),
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+        if r == 0 {
+            break;
+        }
+        done += r;
+        pos += r as usize;
+        o += r;
+    }
+    true
+}
+
+/// `LAB_1002c2e6`: day, month and year over the whole span, joined by "de".
+fn emit_joined(wa: &mut WaSpa, e: &mut [Ent]) -> i32 {
+    let (mut dw, mut mw, mut yw) = (Vec::new(), Vec::new(), Vec::new());
+    for x in e.iter_mut() {
+        match x.role {
+            b'D' => day_words(&mut dw, &x.text),
+            b'M' | b'A' | b'F' => {
+                x.role = b'M';
+                mw = month_words(x);
+            }
+            b'Y' => {
+                yw.clear();
+                year_words(&mut yw, &x.text);
+            }
             _ => return -1,
         }
     }
-    let (start, end) = (entries[0].start, entries[entries.len() - 1].end);
-    if !day_w.is_empty() {
-        if !emit_split(wa, &day_w, start, end, b'D', b'D', 3) {
-            return 0;
-        }
-        if !emit(wa, b"de", start, end, b'A', b'D', 3, None) {
+    let (start, end) = (e[0].start, e[e.len() - 1].end);
+    for w in [&dw, &mw] {
+        if !w.is_empty() && (!emit_split(wa, w, start, end, b'D', b'D', SRC) || !emit(wa, DE, start, end, b'A', b'D', SRC, None)) {
             return 0;
         }
     }
-    if !month_w.is_empty() {
-        if !emit_split(wa, &month_w, start, end, b'D', b'D', 3) {
-            return 0;
-        }
-        if !emit(wa, b"de", start, end, b'A', b'D', 3, None) {
-            return 0;
-        }
-    }
-    if !year_w.is_empty() && !emit_split(wa, &year_w, start, end, b'D', b'D', 3) {
+    if !yw.is_empty() && !emit_split(wa, &yw, start, end, b'D', b'D', SRC) {
         return 0;
     }
     1
 }
 
-/// One entry's spoken text and origin for the default/`case_a` per-entry
-/// walks' `'D'`/`'M'`(numeric)/`'A'`/`'F'`/`'Y'` dispatch: origin is `'D'`
-/// for a day/numeric-month/year reading, but `'A'` for an alpha-matched
-/// month name (`'A'`/`'F'`, which reach `emit` via `LAB_1002c20e` in the
-/// real `FUN_1002bf10`, not the inline numeric-month call) -- the one
-/// origin byte this pass's earlier version got wrong (see the probe/capture
-/// diff this was fixed against).
-fn entry_words(e: &DateEntry) -> Option<(Vec<u8>, u8)> {
-    let mut w = Vec::new();
-    let origin = match e.role {
-        b'D' => {
-            day_words(&mut w, &e.text);
-            b'D'
-        }
-        b'M' => {
-            let v = atoi(&e.text) as usize;
-            if v < MONTH_WORD.len() {
-                w.extend_from_slice(MONTH_WORD[v]);
+/// `switchD_1002bf65_caseD_7` (`with_de` false) and `caseD_a` (true: "de"
+/// after every entry but the last and weekdays).
+fn emit_each(wa: &mut WaSpa, t: &[u8], e: &[Ent], with_de: bool) -> i32 {
+    let n = e.len();
+    // `local_200` is never cleared between entries: a second day appends.
+    let mut dw = Vec::new();
+    for (i, x) in e.iter().enumerate() {
+        let ok = if x.text == DAYS && matches!(x.role, b'D' | b'Y') {
+            emit_days(wa, t, x)
+        } else {
+            match x.role {
+                b'D' => {
+                    day_words(&mut dw, &x.text);
+                    emit_split(wa, &dw, x.start, x.end, b'D', b'D', SRC)
+                }
+                b'M' | b'A' | b'F' => {
+                    let origin = if x.class == 1 { b'A' } else { b'D' };
+                    emit(wa, &month_words(x), x.start, x.end, origin, b'D', SRC, None)
+                }
+                b'Y' => {
+                    let mut w = Vec::new();
+                    year_words(&mut w, &x.text);
+                    emit_split(wa, &w, x.start, x.end, b'D', b'D', SRC)
+                }
+                b'w' | b'W' if with_de => emit_split(wa, &x.word, x.start, x.end, b'D', b'D', SRC),
+                b'w' | b'W' | b'S' if !with_de => emit(wa, &x.word, x.start, x.end, b'A', b'D', SRC, None),
+                b'I' | b'O' | b'T' if !with_de => emit(wa, &x.text, x.start, x.end, b'A', b'D', SRC, None),
+                _ => return -1,
             }
-            b'D'
+        };
+        if !ok {
+            return 0;
         }
-        b'A' | b'F' => {
-            w.extend_from_slice(&e.word);
-            b'A'
+        if with_de && i != n - 1 && !matches!(x.role, b'w' | b'W') && !emit(wa, DE, x.start, x.end, b'A', b'D', SRC, None) {
+            return 0;
         }
-        b'Y' => {
-            year_to_words(&mut w, &e.text);
-            b'D'
+    }
+    1
+}
+
+/// `FUN_1002bf10(wa, entries, pattern)`.
+fn emit_date(wa: &mut WaSpa, t: &[u8], e: &mut [Ent], k: usize) -> i32 {
+    let plain = |e: &[Ent], idx: &[usize]| idx.iter().all(|&i| e[i].text != DAYS);
+    let with_de = match k {
+        6 => {
+            if plain(e, &[0, 2]) {
+                return emit_joined(wa, e);
+            }
+            e[0].role == b'D'
         }
-        _ => return None,
+        9 => {
+            if plain(e, &[0, 1, 2]) {
+                return emit_joined(wa, e);
+            }
+            e[0].role == b'D' && e[1].role == b'M' && e[2].role == b'Y'
+        }
+        0xa | 0xb => true,
+        0xe => {
+            if plain(e, &[0, 1]) {
+                return emit_joined(wa, e);
+            }
+            (e[0].role == b'M' && e[1].role == b'Y') || (e[0].role == b'D' && e[1].role == b'M')
+        }
+        _ => false,
     };
-    Some((w, origin))
-}
-
-/// `switchD_1002bf65_caseD_a` (patterns 10/11, "WNM"/"NM"): like the default
-/// walk, but a literal "de" is inserted after every non-final, non-weekday
-/// entry (these two shapes have no filler token of their own).
-fn emit_case_a(wa: &mut WaSpa, entries: &[DateEntry]) -> i32 {
-    let n = entries.len();
-    for (i, e) in entries.iter().enumerate() {
-        let ok = match e.role {
-            b'D' | b'M' | b'A' | b'F' | b'Y' => {
-                let Some((w, origin)) = entry_words(e) else { return -1 };
-                emit_split(wa, &w, e.start, e.end, origin, b'D', 3)
-            }
-            b'w' | b'W' => emit_split(wa, &e.word, e.start, e.end, b'A', b'D', 3),
-            _ => return -1,
-        };
-        if !ok {
-            return 0;
-        }
-        if i != n - 1 && !matches!(e.role, b'w' | b'W') && !emit(wa, b"de", e.start, e.end, b'A', b'D', 3, None) {
-            return 0;
-        }
-    }
-    1
-}
-
-/// `switchD_1002bf65_caseD_7`: the general per-entry walk for every pattern
-/// not covered by [`emit_joined`]/[`emit_case_a`]. Each entry is emitted
-/// using its own literal separator/filler text (`'I'`/`'O'`/`'T'`) or
-/// resolved word (`'D'`/`'M'`/`'A'`/`'F'`/`'Y'`/`'w'`/`'W'`/`'S'`).
-fn emit_default(wa: &mut WaSpa, entries: &[DateEntry]) -> i32 {
-    for e in entries {
-        let ok = match e.role {
-            b'D' | b'M' | b'A' | b'F' | b'Y' => {
-                let Some((w, origin)) = entry_words(e) else { return -1 };
-                emit_split(wa, &w, e.start, e.end, origin, b'D', 3)
-            }
-            b'w' | b'W' | b'S' => emit_split(wa, &e.word, e.start, e.end, b'A', b'D', 3),
-            b'I' | b'O' | b'T' => emit_split(wa, &e.text, e.start, e.end, b'A', b'D', 3),
-            _ => return -1,
-        };
-        if !ok {
-            return 0;
-        }
-    }
-    1
-}
-
-/// `FUN_1002bf10(wa, entries, pattern_idx)`.
-fn emit_date(wa: &mut WaSpa, entries: &[DateEntry], pattern_idx: usize) -> i32 {
-    match pattern_idx {
-        6 | 9 | 14 => emit_joined(wa, entries),
-        10 | 11 => emit_case_a(wa, entries),
-        _ => emit_default(wa, entries),
-    }
-}
-
-/// The pattern-match shape letter for an entry's role: `local_228` (the
-/// shape string) shows `'M'` for *both* an abbreviated (`'A'`) and a full
-/// (`'F'`) month-name match, and `'W'` for *both* the lowercase (`'w'`) and
-/// uppercase (`'W'`) weekday-table match -- only the *entry's own* role
-/// (`local_210`, kept verbatim in `DateEntry::role`) distinguishes them, for
-/// the period-absorb check and (for A/F) which word source `emit` uses.
-fn shape_char(role: u8) -> u8 {
-    match role {
-        b'A' | b'F' => b'M',
-        b'w' => b'W',
-        r => r,
-    }
+    emit_each(wa, t, e, with_de)
 }
 
 /// `FUN_1002b410(wa, tok, t + p, off)`.
-pub fn date(_fe: &FeSpa, wa: &mut WaSpa, _tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
-    let entries = classify(t, p, off);
-    let mut count = entries.len();
-    while count >= 1 {
-        let Some((lo, hi)) = pattern_range(count) else {
-            count -= 1;
-            continue;
-        };
-        let shape: Vec<u8> = entries[..count].iter().map(|e| shape_char(e.role)).collect();
-        for pattern_idx in lo..hi {
-            if PATTERNS[pattern_idx] != shape.as_slice() {
-                continue;
-            }
-            let mut resolved = entries[..count].to_vec();
-            if !resolve(&mut resolved, pattern_idx, false) {
+pub fn date(fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    let mut e: Vec<Ent> = vec![Ent::default(); 7];
+    let mut shape = [0u8; 8];
+    let mut roles = [0u8; 32];
+    let (mut n, mut k) = (0usize, 0usize);
+    let mut pending: i32 = -1;
+    let mut seps = 0;
+    let (mut year_flag, mut day_flag) = (false, false);
+    let mut ctx = false;
+    let (mut q, mut o) = (p, off);
+
+    loop {
+        let (cur, used) = if k < 1 {
+            (tok.clone(), tok.consumed)
+        } else {
+            let (tk, c) = tokenize(t, q, o, 3);
+            if c == 0 || tk.class == 10 {
                 break;
             }
-            let r = emit_date(wa, &resolved, pattern_idx);
-            if r < 1 {
-                return r;
+            (tk, c)
+        };
+        let text = cur.text().to_vec();
+        let ch = cur.text[0];
+
+        if pending == -1 && cur.len == 1 && ch != 0 && b"/-.,".contains(&ch) {
+            q += used as usize;
+            o += used;
+            let (peek, _) = tokenize(t, q, o, 3);
+            let mut absorb = false;
+            if ch == b'.' && cur.ws == 0 && k > 0 && matches!(roles[k - 1], b'A' | b'w') && peek.len > 0 {
+                let tail = |pk: &Tok| pk.ws >= 0 && pk.ws <= 1 && pk.len == 1 && matches!(pk.text[0], b',' | b'/');
+                absorb = if peek.ws < 1 {
+                    tail(&peek)
+                } else if peek.ws > 1 || !number_gate(peek.text()) {
+                    (peek.ws < 2 && peek.text() == EL) || tail(&peek)
+                } else {
+                    true
+                };
             }
-            return resolved[count - 1].end - off;
+            if absorb {
+                roles[k] = ch;
+                e[n - 1].end += 1;
+                e[n - 1].len += 1;
+                e[n - 1].dot = 1;
+            } else {
+                if k == 0 || seps > 2 {
+                    break;
+                }
+                roles[k] = ch;
+                seps += 1;
+                e[n - 1].sep = ch as i8 as i16;
+                pending = k as i32;
+            }
+            k += 1;
+            if n > 5 {
+                break;
+            }
+            continue;
         }
-        count -= 1;
+
+        if n > 0
+            && shape[0] == b'W'
+            && pending == -1
+            && ch == b','
+            && cur.len == 1
+            && cur.ws < 2
+            && k > 0
+            && matches!(roles[k - 1], b'.' | b'W' | b'w')
+        {
+            roles[k] = b',';
+            q += used as usize;
+            o += used;
+            if roles[k - 1] == b'.' {
+                e[n - 1].end += 1;
+                e[n - 1].len += 1;
+            }
+            k += 1;
+            if n > 5 {
+                break;
+            }
+            continue;
+        }
+
+        let mut word: Vec<u8> = Vec::new();
+        let mut text = text;
+        let role: u8;
+        let sh: u8;
+        if eqi(DE, &text) || eqi(b"del", &text) {
+            role = b'O';
+            sh = b'O';
+        } else if eqi(EL, &text) {
+            role = b'T';
+            sh = b'T';
+        } else if k == 0 && eqi(b"en", &text) {
+            role = b'I';
+            sh = b'I';
+        } else if [&b"AC"[..], b"A.C", b"DC", b"D.C"].iter().any(|w| eqi(w, &text)) {
+            role = b'S';
+            sh = b'S';
+            word = if ch == b'A' { b"AC".to_vec() } else { b"DC".to_vec() };
+        } else if let Some(i) = search(&WEEKDAY_ABBR, |x| x.0, &text) {
+            role = b'w';
+            sh = b'W';
+            word = WEEKDAY_ABBR[i].1.to_vec();
+        } else if let Some(i) = search(&WEEKDAY, |x| x, &text) {
+            role = b'W';
+            sh = b'W';
+            word = WEEKDAY[i].to_vec();
+        } else {
+            let abbr = search(&MONTH_ABBR, |x| x.0, &text);
+            let full = if abbr.is_none() { search(&MONTH_FULL, |x| x, &text) } else { None };
+            if abbr.is_some() || full.is_some() {
+                if pending >= 0 {
+                    if pending + 1 != k as i32 {
+                        break;
+                    }
+                    pending = -1;
+                }
+                sh = b'M';
+                if let Some(i) = abbr {
+                    role = b'A';
+                    word = MONTH_WORD[atoi(MONTH_ABBR[i].1) as usize].to_vec();
+                } else {
+                    role = b'F';
+                    word = fold_lower(&text);
+                }
+            } else {
+                if !day_flag && cur.class == 2 && all_digits(&text) {
+                    let mut r = day_list(&cur, t, q, o);
+                    if r < 0 {
+                        r = day_range(&cur, t, q, o, &mut year_flag, &mut day_flag);
+                    }
+                    if r >= 0 {
+                        let after_range = day_flag && n >= 1 && shape[n - 1] == b'N' && matches!(e[n - 1].sep, 0x2d | 0x2f);
+                        if !after_range {
+                            let x = &mut e[n];
+                            x.start = o;
+                            x.ws = cur.ws;
+                            x.end = o + r;
+                            x.len = r - cur.ws;
+                            x.class = 2;
+                            x.text = DAYS.to_vec();
+                            x.role = if year_flag { b'Y' } else { b'D' };
+                            roles[k] = x.role;
+                            x.pos = q;
+                            shape[n] = b'N';
+                            q += r as usize;
+                            o += r;
+                            n += 1;
+                            k += 1;
+                            year_flag = false;
+                        }
+                        if n > 5 {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                if !number_gate(&text) {
+                    break;
+                }
+                if pending >= 0 {
+                    if pending + 1 != k as i32 {
+                        break;
+                    }
+                    pending = -1;
+                }
+                sh = b'N';
+                let y = year_form(&text);
+                if y >= 0 {
+                    role = b'Y';
+                    text = y.to_string().into_bytes();
+                } else {
+                    let d = ordinal_day(&text);
+                    if d >= 0 {
+                        role = b'D';
+                        text = d.to_string().into_bytes();
+                    } else {
+                        role = b'N';
+                    }
+                }
+            }
+        }
+
+        roles[k] = role;
+        shape[n] = sh;
+        let end = o + used;
+        let x = &mut e[n];
+        x.start = cur.start;
+        x.ws = cur.ws;
+        x.end = end;
+        x.len = cur.len;
+        x.class = cur.class;
+        x.role = role;
+        q += used as usize;
+        o += used;
+        x.pos = q;
+        if day_flag {
+            day_flag = false;
+        }
+        x.text = text;
+        if !word.is_empty() {
+            x.word = word;
+        }
+        n += 1;
+        k += 1;
+        if n > 5 {
+            break;
+        }
+    }
+
+    while n >= 1 {
+        let range = match n {
+            6 => 0..1,
+            5 => 1..3,
+            4 => 3..6,
+            3 => 6..11,
+            2 => 11..17,
+            1 => 17..20,
+            _ => 0..0,
+        };
+        if let Some(pat) = range.into_iter().find(|&i| PATTERNS[i] == &shape[..n]) {
+            let consumed = e[n - 1].end - off;
+            if matches!(pat, 9 | 0xe | 0x11 | 0x12 | 0x13) && date_context(t, p, off, consumed, fe.era.is_2009()) {
+                ctx = true;
+            }
+            let (ents, sh) = (&mut e[..n], &mut shape[..n]);
+            if resolve(ents, sh, pat, ctx) {
+                let r = emit_date(wa, t, ents, pat);
+                return if r < 1 { r } else { consumed };
+            }
+        }
+        shape[n - 1] = 0;
+        n -= 1;
     }
     -1
 }

@@ -9,9 +9,194 @@
 //! left-half and right-half keys, serve the half-phone lookups.
 
 use super::tables::{DATA, DATA_LO};
-use super::tables_spa;
+use super::{tables_julie09, tables_paul09, tables_spa, tables_viol09};
 use crate::bank::Bank;
+use crate::era::Era;
 use crate::lang::Lang;
+
+/// Unit-selection tables of one 2009 build: the byte span copied from its DLL plus the address of
+/// every table, read by address as the engine does (`tools/gen_unitsel_tables_09.py`).
+#[derive(Clone, Copy)]
+pub struct Tab09 {
+    lo: u32,
+    data: &'static [u8],
+    pub collapse: u32,
+    pub key_c: u32,
+    pub key_l: u32,
+    pub key_r: u32,
+    pub hk1_cls: u32,
+    pub hk2_cls: u32,
+    pub vowel: u32,
+    pub voiced: u32,
+    pub stress: u32,
+    pub edge_sub: u32,
+    pub ctr_sub: u32,
+    pub j_flag: u32,
+    pub j_prev: u32,
+    pub j_next: u32,
+    pub w_key: u32,
+    pub w_half: u32,
+    pub pos_j: u32,
+    pub pos_a: u32,
+    pub pos_b: u32,
+    pub st_a: u32,
+    pub st_b: u32,
+    pub tc_div: u32,
+    pub join_w: u32,
+    /// Violeta (`viol09`) only: class-key maps, and the half-key table of byte 7.
+    pub l_nv: u32,
+    pub r_nv: u32,
+    pub l_v2: u32,
+    pub hk_c: u32,
+    /// The Violeta build: 8-byte half keys, its own class key, lookups, lattice, target and join cost.
+    pub viol: bool,
+}
+
+macro_rules! tab09 {
+    ($m:ident, $viol:expr) => {{
+        use $m::*;
+        Tab09 {
+            viol: $viol,
+            l_nv: A_L_NV,
+            r_nv: A_R_NV,
+            l_v2: A_L_V2,
+            hk_c: A_HK_C,
+            lo: DATA_LO,
+            data: &DATA,
+            collapse: A_COLLAPSE,
+            key_c: A_KEY_C,
+            key_l: A_KEY_L,
+            key_r: A_KEY_R,
+            hk1_cls: A_HK1_CLS,
+            hk2_cls: A_HK2_CLS,
+            vowel: A_VOWEL,
+            voiced: A_VOICED,
+            stress: A_STRESS,
+            edge_sub: A_EDGE_SUB,
+            ctr_sub: A_CTR_SUB,
+            j_flag: A_J_FLAG,
+            j_prev: A_J_PREV,
+            j_next: A_J_NEXT,
+            w_key: A_W_KEY,
+            w_half: A_W_HALF,
+            pos_j: A_POS_J,
+            pos_a: A_POS_A,
+            pos_b: A_POS_B,
+            st_a: A_ST_A,
+            st_b: A_ST_B,
+            tc_div: A_TC_DIV,
+            join_w: A_JOIN_W,
+        }
+    }};
+}
+
+impl Tab09 {
+    pub fn julie09() -> Tab09 {
+        tab09!(tables_julie09, false)
+    }
+
+    pub fn paul09() -> Tab09 {
+        tab09!(tables_paul09, false)
+    }
+
+    pub fn viol09() -> Tab09 {
+        tab09!(tables_viol09, true)
+    }
+
+    pub fn for_era(era: Era) -> Option<Tab09> {
+        match era {
+            Era::Julie09 => Some(Tab09::julie09()),
+            Era::Paul09 => Some(Tab09::paul09()),
+            Era::Violeta09 => Some(Tab09::viol09()),
+            Era::V2014 => None,
+        }
+    }
+
+    /// Length of the half-phone keys.
+    pub fn hk_len(&self) -> usize {
+        if self.viol { 8 } else { 9 }
+    }
+
+    pub fn b(&self, addr: u32, i: u8) -> u8 {
+        self.data.get((addr - self.lo) as usize + i as usize).copied().unwrap_or(0)
+    }
+
+    pub fn i(&self, addr: u32, i: usize) -> i32 {
+        let o = (addr - self.lo) as usize + 4 * i;
+        i32::from_le_bytes([self.data[o], self.data[o + 1], self.data[o + 2], self.data[o + 3]])
+    }
+
+    pub fn f(&self, addr: u32, i: usize) -> f32 {
+        f32::from_bits(self.i(addr, i) as u32)
+    }
+}
+
+/// `us_LabelToClassKey` of the 2009 engines (julie09 `FUN_10016810`, viol09 `FUN_10018f80`): the
+/// 7-byte class key of a 5-byte unit label `[L1, C, R1, a, b]`.
+pub fn class_key09(t: &Tab09, l: &[u8; 5]) -> [u8; 7] {
+    if t.viol {
+        let voiced = t.b(t.voiced, l[1]) != 0;
+        let k0 = if !voiced {
+            t.b(t.l_nv, l[0])
+        } else if l[3] / 10 == 2 {
+            t.b(t.l_v2, l[0])
+        } else {
+            t.b(t.key_l, l[0])
+        };
+        let k2 = if l[3] % 10 == 2 {
+            t.b(t.hk2_cls, l[2])
+        } else if !voiced {
+            t.b(t.r_nv, l[2])
+        } else {
+            t.b(t.key_r, l[2])
+        };
+        return [k0, t.b(t.key_c, l[1]), k2, l[3], l[4], t.b(t.key_c, l[2]), t.b(t.key_c, l[0])];
+    }
+    let hi = l[3] / 10;
+    let lo = l[3] % 10;
+    let k3 = if t.b(t.vowel, l[1]) == 0 || hi < 2 { hi } else { 2 };
+    let mut k6 = l[4] % 10;
+    if lo == 0 && l[4] % 10 == 2 {
+        k6 = 1;
+    }
+    [t.b(t.key_l, l[0]), t.b(t.key_c, l[1]), t.b(t.key_r, l[2]), k3, lo, 0, k6]
+}
+
+/// The half-phone key of a 7-byte class key (julie09 `FUN_100168c0`: 9 bytes; viol09
+/// `FUN_10019060`: 8 bytes); `mode` 1 = left half, 2 = right half.
+pub fn half_key09(t: &Tab09, k: &[u8; 7], mode: u8) -> Vec<u8> {
+    if t.viol {
+        let b = k[3] % 10;
+        let b_hi = if b < 3 { 0 } else { b };
+        let c = k[4] / 10;
+        let d = k[4] % 10;
+        let d_hi = if d < 3 { 0 } else { d };
+        return if mode == 1 {
+            vec![
+                0,
+                k[1],
+                t.b(t.hk1_cls, k[0]),
+                (k[3] / 10).wrapping_mul(10).wrapping_add(b_hi),
+                k[0],
+                c.wrapping_mul(10).wrapping_add(d_hi),
+                d,
+                t.b(t.hk_c, k[2]),
+            ]
+        } else {
+            vec![1, k[1], t.b(t.hk2_cls, k[2]), b, k[2], d, c, t.b(t.hk_c, k[0])]
+        };
+    }
+    if mode == 1 {
+        let mut b2 = if k[3] < 2 { 0 } else { k[3].wrapping_mul(10) };
+        b2 = b2.wrapping_add(t.b(t.voiced, k[0]));
+        vec![0, k[1], b2, t.b(t.hk1_cls, k[0]), k[0], k[3], k[5], k[4], k[6]]
+    } else {
+        let mut b2 = if k[4] < 2 { 0 } else { k[4].wrapping_mul(10) };
+        b2 = b2.wrapping_add(t.b(t.voiced, k[2]));
+        let b7 = (t.b(t.voiced, k[1]) == 0 && k[3] != 0) as u8;
+        vec![1, k[1], b2, t.b(t.hk2_cls, k[2]), k[2], k[4], k[6], b7, k[5]]
+    }
+}
 
 fn tb(addr: u32, i: u8) -> u8 {
     DATA[(addr - DATA_LO) as usize + i as usize]
@@ -159,11 +344,90 @@ pub struct Classes {
     pub half_order: [Vec<u32>; 2],
     /// 10 bytes/key for English, 11 for Violeta (`half_key_len`).
     pub half_keys: [Vec<Vec<u8>>; 2],
+    /// 2009 builds only: the 7-byte class keys (`key` stays empty there).
+    pub key7: Vec<[u8; 7]>,
 }
 
 impl Classes {
     pub fn build(bank: &Bank) -> Classes {
         Self::build_lang(bank, Lang::Eng)
+    }
+
+    /// Classes of a 2009 bank, as `us_MakePhoneClass` + `us_MakeHalfPhoneOrders` (julie09
+    /// `FUN_1001bcf0` / `FUN_1002c190`) build them when no class index file exists: classes in
+    /// ascending 7-byte key order, units ascending within a class, the two half-key orders (9-byte
+    /// keys) by the engine's heap sort.
+    pub fn build_era(bank: &Bank, era: Era) -> Classes {
+        let t = Tab09::for_era(era).expect("2009 selection tables for this build");
+        let n = bank.len();
+        let keys: Vec<[u8; 7]> = bank.label5.iter().map(|l| class_key09(&t, l)).collect();
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_by(|&a, &b| keys[a as usize].cmp(&keys[b as usize]).then(a.cmp(&b)));
+        let mut cls = Classes {
+            lang: Lang::Eng,
+            key: Vec::new(),
+            count: Vec::new(),
+            start: Vec::new(),
+            units: order.clone(),
+            class_of: vec![0; n],
+            half_order: [Vec::new(), Vec::new()],
+            half_keys: [Vec::new(), Vec::new()],
+            key7: Vec::new(),
+        };
+        for (i, &u) in order.iter().enumerate() {
+            let k = keys[u as usize];
+            if cls.key7.last() != Some(&k) {
+                cls.key7.push(k);
+                cls.count.push(0);
+                cls.start.push(i as u32);
+            }
+            let c = cls.key7.len() - 1;
+            *cls.count.last_mut().unwrap() += 1;
+            cls.class_of[u as usize] = c as u32;
+        }
+        for m in 0..2 {
+            let hk: Vec<Vec<u8>> = cls.key7.iter().map(|k| half_key09(&t, k, m as u8 + 1)).collect();
+            let mut idx: Vec<u32> = (0..cls.key7.len() as u32).collect();
+            let mut ra: Vec<usize> = (0..hk.len()).collect();
+            nr_heapsort2(&mut ra, &mut idx, |a, b| cmp_prefix(&hk[a], &hk[b], t.hk_len()));
+            cls.half_keys[m] = ra.iter().map(|&i| hk[i].clone()).collect();
+            cls.half_order[m] = idx;
+        }
+        cls
+    }
+
+    /// `FUN_1001ab30` (julie09): the contiguous run of classes whose 7-byte key matches `k` in its
+    /// first `n` bytes. Returns `(first, count)`.
+    pub fn find_class_range7(&self, k: &[u8; 7], n: usize) -> (u32, u32) {
+        let len = self.key7.len() as i32;
+        let (mut lo, mut hi) = (0i32, len - 1);
+        if hi < 0 {
+            return (0, 0);
+        }
+        let mid = loop {
+            let mid = (lo + hi) / 2;
+            let c = cmp_prefix(k, &self.key7[mid as usize], n);
+            if c == 0 {
+                break mid;
+            }
+            if c < 0 {
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+            if hi < lo {
+                return (0, 0);
+            }
+        };
+        let mut first = mid;
+        while first > 0 && cmp_prefix(k, &self.key7[first as usize - 1], n) == 0 {
+            first -= 1;
+        }
+        let mut last = mid;
+        while last < len - 1 && cmp_prefix(k, &self.key7[last as usize + 1], n) == 0 {
+            last += 1;
+        }
+        (first as u32, (last - first + 1) as u32)
     }
 
     pub fn build_lang(bank: &Bank, lang: Lang) -> Classes {
@@ -180,6 +444,7 @@ impl Classes {
             class_of: vec![0; n],
             half_order: [Vec::new(), Vec::new()],
             half_keys: [Vec::new(), Vec::new()],
+            key7: Vec::new(),
         };
         for (i, &u) in order.iter().enumerate() {
             let k = keys[u as usize];
@@ -206,7 +471,7 @@ impl Classes {
     }
 
     pub fn n_classes(&self) -> usize {
-        self.key.len()
+        self.key.len().max(self.key7.len())
     }
 
     pub fn units_of(&self, c: u32) -> &[u32] {

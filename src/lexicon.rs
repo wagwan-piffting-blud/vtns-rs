@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::era::Era;
 use crate::ling::tables::{CODEBOOK, DIGRAPHS, TOLOWER_S, TOLOWER_U};
 
 /// `FUN_1001c2c0`: case-insensitive strcmp through the u16 case map, indexed
@@ -497,29 +498,48 @@ pub struct Lexicon {
     /// `engbi.tree3`: break-index tree.
     pub engbi: crate::tree3::Tree,
     pub exc: ExceptDict,
+    pub era: Era,
 }
 
 impl Lexicon {
     /// `dict_eng` = `data-common/dict-eng`.
     pub fn open(dict_eng: &Path) -> std::io::Result<Lexicon> {
-        let atmt_raw = std::fs::read(dict_eng.join("atmt.tree3"))?;
-        let n = u32::from_le_bytes(atmt_raw[..4].try_into().unwrap()) as usize;
-        let mut atmt = Vec::with_capacity(n);
-        let mut p = 4usize;
-        for _ in 0..n {
-            let (t, used) = crate::tree3::Tree::parse(&atmt_raw[p..]).ok_or_else(|| bad("atmt.tree3".into()))?;
-            atmt.push(t);
-            p += used;
-        }
+        Lexicon::open_era(dict_eng, Era::V2014)
+    }
+
+    /// The Paul09 trees are `.tree2` (`tree2::load`); every other build reads `.tree3`.
+    pub fn open_era(dict_eng: &Path, era: Era) -> std::io::Result<Lexicon> {
+        let tree = |name: &str| -> std::io::Result<crate::tree3::Tree> {
+            if era == Era::Paul09 {
+                crate::tree2::load(&dict_eng.join(format!("{}.tree2", name)), false)
+            } else {
+                crate::tree3::Tree::load(&dict_eng.join(format!("{}.tree3", name)))
+            }
+        };
+        let atmt = if era == Era::Paul09 {
+            crate::tree2::load_multi(&dict_eng.join("atmt.tree2"), 27)?
+        } else {
+            let atmt_raw = std::fs::read(dict_eng.join("atmt.tree3"))?;
+            let n = u32::from_le_bytes(atmt_raw[..4].try_into().unwrap()) as usize;
+            let mut atmt = Vec::with_capacity(n);
+            let mut p = 4usize;
+            for _ in 0..n {
+                let (t, used) = crate::tree3::Tree::parse(&atmt_raw[p..]).ok_or_else(|| bad("atmt.tree3".into()))?;
+                atmt.push(t);
+                p += used;
+            }
+            atmt
+        };
         Ok(Lexicon {
             emb: HashDict::open(dict_eng, "emb", "engttsdict_emb")?,
             tpp: HashDict::open(dict_eng, "eng_tpp", "tppdict_eng")?,
             chc: Txt2::open(&dict_eng.join("chc_sort.txt2"), true, true)?,
             wab: Txt2::open(&dict_eng.join("wab.txt2"), false, true)?,
             atmt,
-            poly: crate::tree3::Tree::load(&dict_eng.join("poly.tree3"))?,
-            engbi: crate::tree3::Tree::load(&dict_eng.join("engbi.tree3"))?,
+            poly: tree("poly")?,
+            engbi: tree("engbi")?,
             exc: ExceptDict::open(&dict_eng.join("exceptdict"))?,
+            era,
         })
     }
 

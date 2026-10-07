@@ -80,6 +80,7 @@ fn stop_here(wa: &mut WaSpa, s1: i16, off: i32) -> i32 {
 
 /// Normalize the sentence at `t[p0..]`.
 pub fn normalize_tokens(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], p0: usize) -> i32 {
+    crate::text::cstr::set_era(fe.era);
     let mut p = p0;
     let mut mark: i16 = 0;
     'outer: loop {
@@ -103,6 +104,10 @@ pub fn normalize_tokens(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], p0: usize) -> i32 
                 return stop(wa, s1);
             }
             if mark != 0 && mark < wa.i16(0) {
+                // The next sentence picks the path up again in tag mode.
+                if wa.i16(TAG_MODE) == 0 {
+                    wa.set_i16(TAG_MODE, 1);
+                }
                 return stop_at(wa, mark, s1, off);
             }
             p += r as usize;
@@ -183,9 +188,11 @@ pub fn normalize_tokens(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], p0: usize) -> i32 
 
         restore(wa, s1);
         let mut r = -1;
-        for f in CHAIN.iter().chain(std::iter::once(&(word as Norm))) {
+        let mut slot = 0;
+        for (i, f) in CHAIN.iter().chain(std::iter::once(&(word as Norm))).enumerate() {
             r = f(fe, wa, &mut tok, t, p, off);
             if r >= 0 {
+                slot = i;
                 break;
             }
             restore(wa, s1);
@@ -200,5 +207,15 @@ pub fn normalize_tokens(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], p0: usize) -> i32 
             return stop_at(wa, mark, s1, off);
         }
         p += r as usize;
+        // Only the URL normalizer can leave tag mode on (a path follows).
+        if slot == 0 && wa.i16(TAG_MODE) != 0 {
+            if mark != 0 {
+                return finish(wa);
+            }
+            mark = wa.i16(0);
+            if mark < 1 {
+                return finish(wa);
+            }
+        }
     }
 }

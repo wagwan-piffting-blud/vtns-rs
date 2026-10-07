@@ -3,18 +3,8 @@
 //! section, never transcribed by hand). See `abbrev.rs` for the lookup
 //! logic that reads these.
 //!
-//! `FUN_10033990`'s own unit-name table, `0x10072ec8`/stride 0x46, used to
-//! live here a second time (as `UNIT_TABLE`) alongside `tables_oth::
-//! UNIT_WORDS` -- the same 217 DLL entries transcribed twice, by two
-//! separate `pefile` passes, into two different Rust shapes (a `u8` gender
-//! byte here vs. a `bool` there) feeding two independent, and differently
-//! buggy, reimplementations of `FUN_10033990` (this file's own since-removed
-//! `unit_word` and `tables_oth::unit_word`): this file's own stripped-suffix
-//! retry cut two trailing bytes instead of one, and neither file's retry
-//! guard matched the decompile's own `_Count > 1` (i.e. original word length
-//! `>= 3`, not `>= 2`/`>= 4`). Deduplicated onto the one correct copy,
-//! `tables_oth::UNIT_WORDS`/`tables_oth::unit_word` (also fixed to match the
-//! decompile exactly); `abbrev::unit_word` below now delegates to it.
+//! `FUN_10033990`'s unit-name table (`0x10072ec8`) is `tables_oth::UNIT_WORDS`;
+//! its one lookup is `abbrev::unit_lookup`.
 
 /// `0x10076a80` (1 entries, stride 0x27): (key, expansion, gender).
 pub const CAPITAL_FEDERAL: [(&[u8], &[u8], u8); 1] = [

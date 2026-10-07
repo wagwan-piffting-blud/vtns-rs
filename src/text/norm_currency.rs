@@ -400,6 +400,15 @@ fn validate(sl: &[Slot], tags: &[u8], i: i32, nx: &Tok) -> bool {
     }
     let is_a = |k: usize| stricmp(&sl[k].text, s(0x1007d454)) == 0;
     let num_after = |ws1: i32| ws1 > 1 && nx.len > 0 && nx.class == 2 && nx.ws < 2;
+    // paul09 FUN_10033650: only the "A" lead, lowercase and spacing checks.
+    if era() == crate::era::Era::Paul09 {
+        return match i {
+            7 | 8 => !(is_a(0) && sl[1].ws > 0),
+            10 => no_lowercase(&sl[0].text),
+            0x17 => no_lowercase(&sl[1].text),
+            _ => true,
+        };
+    }
     match i {
         0 | 0xe => !is_a(3),
         2 => !is_a(2),
@@ -439,10 +448,11 @@ fn emit(fe: &Fe, wa: &mut Wa, t: &[u8], sl: &[Slot]) -> bool {
         }
     }
     let end = sl[sl.len() - 1].end;
-    if ids.n >= 0 && sl[ids.n as usize].text == b"NUMS" {
+    // julie09 FUN_100323c0 reads a list only without a scale word.
+    if ids.n >= 0 && sl[ids.n as usize].text == b"NUMS" && (!fe.era.is_2009() || ids.u == -1) {
         return emit_list(fe, wa, t, sl, ids, sl[0].start + sl[0].ws, end);
     }
-    emit_amount(wa, sl, ids, sl[0].start, end)
+    emit_amount(fe, wa, sl, ids, sl[0].start, end)
 }
 
 /// The subunit ("cent"/"cents") of `name` for a two-digit fraction `frac`.
@@ -492,7 +502,7 @@ fn say(src: &[u8]) -> Vec<u8> {
 /// spoken, 1: exactly one, 2: plural), `plural` the sticky plural flag.
 #[allow(clippy::too_many_arguments)]
 fn tail(wa: &mut Wa, sl: &[Slot], ids: Ids, st: i32, en: i32, w: i32, plural: bool, dollar_without_n: bool, a: Option<&Amount>, sub: &[u8]) -> bool {
-    let sing = w < 2 && !plural;
+    let sing = (w < 2 || era() == crate::era::Era::Paul09) && !plural;
     if ids.c >= 0 && ids.d == -1 && ids.s == -1 && ids.f == -1 && w != 0 {
         let i = sl[ids.c as usize].idx;
         let name = if sing { CODE_TAB.field(i, 0xf).to_vec() } else { spell(CODE_TAB.field(i, 0xf), CODE_TAB.field(i, 0x32)) };
@@ -545,7 +555,7 @@ fn base_name(sl: &[Slot], ids: Ids, with_f: bool) -> Vec<u8> {
 }
 
 /// `FUN_10035950`: one amount.
-fn emit_amount(wa: &mut Wa, sl: &[Slot], ids: Ids, st: i32, en: i32) -> bool {
+fn emit_amount(fe: &Fe, wa: &mut Wa, sl: &[Slot], ids: Ids, st: i32, en: i32) -> bool {
     let mut w = 0;
     let mut plural = false;
     let mut am: Option<Amount> = None;
@@ -557,10 +567,17 @@ fn emit_amount(wa: &mut Wa, sl: &[Slot], ids: Ids, st: i32, en: i32) -> bool {
         if ids.u == -1 {
             let a = amount(&text);
             w = a.w;
-            if a.w != 1 && a.f != 0 {
+            // paul09 FUN_10032e80: plural above one, or exactly one with a fraction; the full text is read unless cents follow.
+            let p09 = fe.era == crate::era::Era::Paul09;
+            if p09 {
+                if a.w > 1 || (a.w == 1 && a.f != 0) {
+                    plural = true;
+                }
+            } else if a.w != 1 && a.f != 0 {
                 plural = true;
             }
-            let name = base_name(sl, ids, true);
+            // julie09 FUN_10032da0 takes the subunit only from a symbol or ISO code.
+            let name = base_name(sl, ids, !fe.era.is_2009());
             if a.f != 0 && a.fl == 2 && !name.is_empty() {
                 sub = subunit(&name, a.f);
             }
@@ -569,16 +586,17 @@ fn emit_amount(wa: &mut Wa, sl: &[Slot], ids: Ids, st: i32, en: i32) -> bool {
                 if cents {
                     None
                 } else {
-                    w = 2;
-                    Some(say(if a.f == 0 { &a.whole } else { &text }))
+                    w = if p09 { 1 } else { 2 };
+                    Some(say(if a.f == 0 && !p09 { &a.whole } else { &text }))
                 }
             } else {
-                Some(say(if cents || a.f == 0 { &a.whole } else { &text }))
+                Some(say(if cents || (a.f == 0 && !p09) { &a.whole } else { &text }))
             };
             a_tag = 0x44;
             am = Some(a);
         } else {
-            w = 2;
+            let p09 = fe.era == crate::era::Era::Paul09;
+            w = if p09 { 1 } else { 2 };
             if !wa.emit_split(&say(&text), st, en, 0x44, 0x44, 3) {
                 return false;
             }
@@ -604,7 +622,8 @@ fn emit_list(fe: &Fe, wa: &mut Wa, t: &[u8], sl: &[Slot], ids: Ids, st: i32, en:
     let len = ns.end - ns.start;
     let (mut q, mut o) = (ns.tptr, ns.start);
     let mut done = 0;
-    let mut other = false;
+    // julie09 FUN_100324d0 names every numeral (2014 only after an unhandled token).
+    let mut other = fe.era.is_2009();
     let mut plural = false;
     let mut sub: Vec<u8> = Vec::new();
     let mut x = Tok::default();
@@ -618,9 +637,16 @@ fn emit_list(fe: &Fe, wa: &mut Wa, t: &[u8], sl: &[Slot], ids: Ids, st: i32, en:
                 if ids.u == -1 {
                     let a = amount(&x.text);
                     let mut w = a.w;
-                    if a.w != 1 && a.f != 0 {
+                    // paul09 FUN_100325d0: as FUN_10032e80, the whole text is read unless cents follow.
+                    let p09 = fe.era == crate::era::Era::Paul09;
+                    if p09 {
+                        if a.w > 1 || (a.w == 1 && a.f != 0) {
+                            plural = true;
+                        }
+                    } else if a.w != 1 && a.f != 0 {
                         plural = true;
                     }
+                    let whole_only = a.f == 0 && !p09;
                     let name = base_name(sl, ids, false);
                     if a.f != 0 && a.fl == 2 && !name.is_empty() {
                         let sb = subunit(&name, a.f);
@@ -631,15 +657,15 @@ fn emit_list(fe: &Fe, wa: &mut Wa, t: &[u8], sl: &[Slot], ids: Ids, st: i32, en:
                     let cents = a.fl == 2 && !sub.is_empty();
                     let names = if a.w == 0 {
                         if !cents {
-                            let src = if a.f == 0 { a.whole.clone() } else { cs(&x.text).to_vec() };
-                            w = 2;
+                            let src = if whole_only { a.whole.clone() } else { cs(&x.text).to_vec() };
+                            w = if p09 { 1 } else { 2 };
                             if !wa.emit_split(&say(&src), st, en, 0x44, 0x44, 3) {
                                 return false;
                             }
                         }
                         other
                     } else if !cents {
-                        let src = if a.f == 0 { a.whole.clone() } else { cs(&x.text).to_vec() };
+                        let src = if whole_only { a.whole.clone() } else { cs(&x.text).to_vec() };
                         if !wa.emit_split(&say(&src), st, en, 0x44, 0x44, 3) {
                             return false;
                         }
@@ -665,7 +691,7 @@ fn emit_list(fe: &Fe, wa: &mut Wa, t: &[u8], sl: &[Slot], ids: Ids, st: i32, en:
                         if !wa.emit_split(&sl[ids.u as usize].disp, st, en, 0x41, 0x44, 3) {
                             return false;
                         }
-                        if !tail(wa, sl, ids, st, en, 2, plural, false, None, &sub) {
+                        if !tail(wa, sl, ids, st, en, if fe.era == crate::era::Era::Paul09 { 1 } else { 2 }, plural, false, None, &sub) {
                             return false;
                         }
                     }

@@ -128,8 +128,12 @@ fn label_entry(fe: &Fe, wa: &Wa, ex: &mut Extra, tok: &Tok, t: &[u8], p: usize, 
     fill(ex, tok, i);
     let base = tok.consumed;
     let (y, r) = tk(fe, t, p + base as usize, off + base, 6);
-    if matches!(y.text[0], b')' | b':' | b'.') && y.len == 1 && y.ws <= 2 {
+    if (matches!(y.text[0], b')' | b':') || (y.text[0] == b'.' && !fe.era.is_2009())) && y.len == 1 && y.ws <= 2 {
         return base + r;
+    }
+    if era() == crate::era::Era::Paul09 {
+        // paul09 FUN_100522c0: a label is kept when whitespace or a short "." follows.
+        return if y.ws != 0 || (y.len < 3 && y.text[0] == b'.') { base } else { 0 };
     }
     if i >= 0 && y.len > 0 {
         let not_period = y.len > 2 || y.text[0] != b'.';
@@ -196,8 +200,56 @@ fn four_ok(w: &[u8]) -> bool {
     cs(w).len() == 4 && all_digits(w)
 }
 
+/// julie09 `FUN_10053900` over the 18-entry pattern table.
+fn validate09(sl: &[Slot], idx: i32, ex: &Extra, flag: bool, prev: &Tok, ctx: &Tok) -> bool {
+    let mut k = if idx < 8 {
+        4
+    } else if idx < 0x10 {
+        3
+    } else {
+        if !flag {
+            return false;
+        }
+        2
+    };
+    let mut cc = 0;
+    for x in sl {
+        if x.tag != b'N' {
+            continue;
+        }
+        k -= 1;
+        let ok = match k {
+            0 => four_ok(&x.text),
+            1 => exch_ok(&x.text, cc),
+            2 => area_ok(&x.text, cc),
+            3 => {
+                if short_ok(&x.text) {
+                    cc = atoi(&x.text);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    let quiet = |prev: &Tok, ctx: &Tok| !(prev.len > 0 && prev.class == 2) && !(ctx.len > 0 && ctx.class == 2);
+    match idx {
+        7 => flag || ex.label.len != 0 || ex.plus.len != 0 || ex.ext.len != 0 || quiet(prev, ctx),
+        0xf => flag || ex.label.len != 0 || ex.ext.len != 0 || quiet(prev, ctx),
+        0x10 | 0x11 => flag,
+        _ => true,
+    }
+}
+
 /// `FUN_100578a0`.
 fn validate(sl: &[Slot], idx: i32, ex: &Extra, flag: bool, prev: &Tok, ctx: &Tok) -> bool {
+    if era().is_2009() {
+        return validate09(sl, idx, ex, flag, prev, ctx);
+    }
     if idx < 0x11 {
         let mut k = if idx < 9 { 4 } else { 3 };
         let mut cc = 0;
@@ -253,7 +305,16 @@ fn emit(wa: &mut Wa, sl: &[Slot], ex: &Extra) -> bool {
         wa.set_ri32(n - 1, 0x2c, 7);
     };
     if ex.label.len > 0 {
-        if !wa.emit_split(&ex.label.exp, ex.label.start, ex.label.end, 0x41, 0x44, 0x1b) {
+        // julie09 FUN_10053710 speaks the label as "the <label> number is" (s(0x100975c4)).
+        let text = if era().is_2009() {
+            let mut v = b"the ".to_vec();
+            v.extend_from_slice(cs(&ex.label.exp));
+            v.extend_from_slice(b" number is");
+            v
+        } else {
+            ex.label.exp.clone()
+        };
+        if !wa.emit_split(&text, ex.label.start, ex.label.end, 0x41, 0x44, 0x1b) {
             return false;
         }
         set7(wa);
@@ -330,7 +391,7 @@ pub fn phone(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) 
                 sl.push(Slot::of(&x, qo + r, b'N'));
             }
             k += 1;
-            if sl.len() > 8 {
+            if sl.len() > if fe.era.is_2009() { 7 } else { 8 } {
                 break;
             }
         }
@@ -352,7 +413,24 @@ pub fn phone(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) 
             groups -= 1;
         }
         first = false;
-        let range = match (groups, n) {
+        let range = if era().is_2009() {
+            // julie09 FUN_10053190: 18 patterns, no single-group entry.
+            match (groups, n) {
+                (2, 3) => Some((0x10, 0x11)),
+                (2, 2) => Some((0x11, PATTERNS.count())),
+                (3, 7) => Some((8, 9)),
+                (3, 6) => Some((9, 10)),
+                (3, 5) => Some((10, 0xe)),
+                (3, 4) => Some((0xe, 0xf)),
+                (3, 3) => Some((0xf, 0x10)),
+                (4, 8) => Some((0, 1)),
+                (4, 7) => Some((1, 4)),
+                (4, 6) => Some((4, 7)),
+                (4, 4) => Some((7, 8)),
+                _ => None,
+            }
+        } else {
+            match (groups, n) {
             (1, 1) => Some((20, PATTERNS.count())),
             (2, 3) => Some((0x11, 0x13)),
             (2, 2) => Some((0x13, 0x14)),
@@ -367,6 +445,7 @@ pub fn phone(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) 
             (4, 6) => Some((5, 8)),
             (4, 4) => Some((8, 9)),
             _ => None,
+            }
         };
         if let Some((lo, hi)) = range {
             let tags: Vec<u8> = sl[..n].iter().map(|x| x.tag).collect();
@@ -376,7 +455,8 @@ pub fn phone(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) 
                 }
                 let consumed = sl[n - 1].end - off;
                 let mut ctx = Tok::default();
-                if matches!(idx, 8 | 0x10 | 0x11 | 0x12 | 0x13 | 0x14) && !flag && phone_context(fe, t, p, off, b'B', consumed, Some(&mut ctx)) {
+                let ctx_idx = if fe.era.is_2009() { matches!(idx, 7 | 0xf | 0x10 | 0x11) } else { matches!(idx, 8 | 0x10 | 0x11 | 0x12 | 0x13 | 0x14) };
+                if ctx_idx && !flag && phone_context(fe, t, p, off, b'B', consumed, Some(&mut ctx)) {
                     flag = true;
                 }
                 let e = ext_read(fe, &mut ex, t, p + consumed as usize, off + consumed);

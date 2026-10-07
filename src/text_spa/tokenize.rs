@@ -80,7 +80,10 @@ fn alpha2(c: u8) -> bool {
 
 /// `FUN_10025a90`: accent folding of token letters.
 pub fn fold(c: u8) -> u8 {
+    let era09 = crate::text::cstr::era().is_2009();
     match c {
+        0xc7 if era09 => 0x43,
+        0xe7 if era09 => 0x63,
         0x8a | 0xc7 => 0x53,
         0x8e => 0x5a,
         0x9a | 0xe7 => 0x73,
@@ -294,6 +297,7 @@ fn ordinal(k: &Cut, last: u8) -> usize {
 /// `FUN_10047000(tok, t + base, off, mode)`: the token at `t[base..]`, whose
 /// offset in the sentence is `off`. Returns the token and the bytes consumed.
 pub fn tokenize(t: &[u8], base: usize, off: i32, mode: i32) -> (Tok, i32) {
+    let era09 = crate::text::cstr::era().is_2009();
     let mut k = Cut { t, base, off, tok: Tok::default(), buf: [0; 64], n: 0, i: 0 };
     let mut nlc = 0;
     let mut acc: i32 = 0;
@@ -372,7 +376,7 @@ pub fn tokenize(t: &[u8], base: usize, off: i32, mode: i32) -> (Tok, i32) {
                 k.n += 1;
                 k.i += 1;
             };
-            if mode != 9 && mode != 8 && mode != 0x14 && s0 == b'.' && alpha2(s1) {
+            if mode != 9 && mode != 8 && (mode != 0x14 || era09) && s0 == b'.' && alpha2(s1) {
                 join(&mut k, b'.');
                 cont = true;
                 continue;
@@ -513,7 +517,7 @@ pub fn tokenize(t: &[u8], base: usize, off: i32, mode: i32) -> (Tok, i32) {
         k.buf[k.n] = 0;
         let mut ordinals = true;
         if k.n < 0x1d {
-            let decimal = mode == 0x13 || !matches!(mode, 0xe | 0x10 | 4 | 6 | 0x14);
+            let decimal = mode == 0x13 || !(matches!(mode, 0xe | 0x10 | 4 | 6) || (mode == 0x14 && !era09));
             if mode == 0x13 && !f13 {
                 let (s0, s1) = (k.c(k.i), k.c(k.i + 1));
                 if (CLS_S[s0 as usize] & 0xc0 != 0 && UPPER_S[s0 as usize] != b'X' && !digit(s1)) || s0 == 0xb2 || s0 == 0xb3 {
@@ -558,10 +562,10 @@ pub fn tokenize(t: &[u8], base: usize, off: i32, mode: i32) -> (Tok, i32) {
                     cont = true;
                     continue;
                 }
-            } else if matches!(mode, 2 | 0xf | 0x14) {
+            } else if matches!(mode, 2 | 0xf) || (mode == 0x14 && !era09) {
                 ordinals = false;
             }
-        } else if matches!(mode, 2 | 0xf | 0x14) {
+        } else if matches!(mode, 2 | 0xf) || (mode == 0x14 && !era09) {
             ordinals = false;
         }
         if ordinals {

@@ -15,6 +15,7 @@ pub mod formats;
 use std::io;
 
 use crate::bank::{Bank, Primary};
+use crate::era::Era;
 
 pub use tables::{CLAMP_HI, CLAMP_LO, HANN_LEN};
 
@@ -740,7 +741,20 @@ pub fn generate_phrase_traced(
     bank: &Bank,
     input: &PhraseInput,
     out: &mut Vec<i16>,
+    trace: Option<&mut Vec<RecTrace>>,
+) -> io::Result<()> {
+    generate_phrase_traced_era(win, bank, input, out, trace, Era::V2014)
+}
+
+/// As `generate_phrase_traced`. The 2009 engines have no join smoother: julie09 `FUN_10029c20`
+/// decodes each record (`FUN_1002a800`) and goes straight to the overlap-add.
+pub fn generate_phrase_traced_era(
+    win: &mut DecodeWindow,
+    bank: &Bank,
+    input: &PhraseInput,
+    out: &mut Vec<i16>,
     mut trace: Option<&mut Vec<RecTrace>>,
+    era: Era,
 ) -> io::Result<()> {
     let mut tail = Tail::default();
     let n = input.records.len();
@@ -763,7 +777,7 @@ pub fn generate_phrase_traced(
             next: if t + 1 < nt { Some(input.uids[t + 1]) } else { None },
             half: input.halves[t],
         };
-        let smoothed = smooth_joins(win, bank, &pi, &mut rec)?;
+        let smoothed = if era.is_2009() { None } else { smooth_joins(win, bank, &pi, &mut rec)? };
         let (src, periods) = match smoothed {
             Some(s) => (s.pcm, Some(s.periods)),
             None => (win.decode(bank, pi.cur, &rec)?, None),

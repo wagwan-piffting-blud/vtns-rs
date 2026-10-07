@@ -107,9 +107,9 @@ fn append(wa: &mut WaSpa, r: usize, s: &[u8]) {
 }
 
 /// `FUN_10022810` + `FUN_10023930` on one word; `None` aborts the pass.
-fn lts_word(word: &[u8], len: i32, mexican: bool, w_foreign: bool) -> Option<Vec<u8>> {
-    let mut w = lts::stage1(word, len, w_foreign)?;
-    lts::stage2(&mut w, mexican, w_foreign)?;
+fn lts_word(word: &[u8], len: i32, mexican: bool, w_foreign: bool, era09: bool) -> Option<Vec<u8>> {
+    let mut w = lts::stage1(word, len, w_foreign, era09)?;
+    lts::stage2(&mut w, mexican, w_foreign, era09)?;
     Some(w.phones())
 }
 
@@ -131,6 +131,7 @@ pub fn lexicon_pass(wa: &mut WaSpa, lex: &LexiconSpa) -> bool {
 }
 
 fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
+    let era09 = lex.era.is_2009();
     if wa.u8(r + war_spa::PHON) != 0 {
         or_flag(wa, r, if wa.i32(r + war_spa::SRC) == 7 { 0x10 } else { 1 });
         return true;
@@ -154,7 +155,8 @@ fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
         None => {
             let at = |k: i32| if k < 0 { 0 } else { key.get(k as usize).copied().unwrap_or(0) };
             let prev = at(len - 2);
-            if len > 2
+            if !era09
+                && len > 2
                 && vowel_count_spa(&key) > 1
                 && at(len - 1) == b's'
                 && matches!(prev, b'b'..=b'd' | b'f'..=b'h' | b'j'..=b'n' | b'p'..=b't' | b'v'..=b'z' | 0xd1 | 0xf1)
@@ -175,7 +177,7 @@ fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
     }
 
     if wa.u8(r + war_spa::PHON) == 0 {
-        let mexican = mexican_ctx_spa(&text);
+        let mexican = mexican_ctx_spa(&text, era09);
         let w_foreign = !mexican && w_foreign_ctx_spa(&text);
         let tail = if len >= 5 { text.get((len - 5) as usize..).unwrap_or(&[]) } else { &[][..] };
         let mente = !(len < 6 || lts::bsearch_ci(&lts::NOT_MENTE, &text) != -1 || strnicmp_spa(tail, b"mente", 5) != 0);
@@ -183,12 +185,12 @@ fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
         stem.resize((len - 5).max(0) as usize, 0);
         let stem = stem.split(|&c| c == 0).next().unwrap_or(&[]).to_vec();
         if mente && vowel_count_spa(&stem) >= 1 {
-            let Some(mut ph) = lts_word(&stem, len - 5, mexican, w_foreign) else { return false };
+            let Some(mut ph) = lts_word(&stem, len - 5, mexican, w_foreign, era09) else { return false };
             if lts::degeminate(&mut ph) {
                 or_flag(wa, r, 4);
             }
             wa.strcpy(r + war_spa::PHON, &ph);
-            let Some(ph2) = lts_word(b"mente", 5, mexican, w_foreign) else { return false };
+            let Some(ph2) = lts_word(b"mente", 5, mexican, w_foreign, era09) else { return false };
             let mut s = vec![lts::SYL];
             s.extend_from_slice(&ph2);
             append(wa, r, &s);
@@ -198,8 +200,14 @@ fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
         } else {
             // With a vowelless stem the engine falls through with the stem's
             // length still in its length variable.
-            let n = if mente { len - 5 } else { klen };
-            let Some(mut ph) = lts_word(&key, n, mexican, w_foreign) else { return false };
+            let n = if era09 {
+                len
+            } else if mente {
+                len - 5
+            } else {
+                klen
+            };
+            let Some(mut ph) = lts_word(&key, n, mexican, w_foreign, era09) else { return false };
             if lts::degeminate(&mut ph) {
                 or_flag(wa, r, 4);
             }
@@ -212,6 +220,10 @@ fn lexicon_word(wa: &mut WaSpa, lex: &LexiconSpa, r: usize) -> bool {
         return true;
     }
 
+    // viol09 `FUN_1001f3d0` uses a lexicon pron as stored.
+    if era09 {
+        return true;
+    }
     let raw: Vec<u8> = wa.cstr(r + war_spa::PHON).iter().copied().filter(|&b| b != lts::SYL).collect();
     let Some(ph) = lts::syllabify_pron(&raw) else { return false };
     wa.strcpy(r + war_spa::PHON, &ph);

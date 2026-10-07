@@ -1,357 +1,941 @@
-//! `FUN_10031720` (chain slot 6): units ("60 NM", "30 kt", "10 mi", very
-//! common in NWS marine text).
+//! `FUN_10031720` (chain slot 6): units. A leading amount (`FUN_10033050`:
+//! a grouped number, a number range or list, or the previous word when an
+//! earlier normalizer left a number or currency amount there) followed by
+//! up to five unit tokens, each tagged by where it was found:
+//! - 'E' `FUN_100338b0` group A or the unit-name table `FUN_10033990`,
+//! - 'P' group B, 'C' group C (`abbrev_groups.rs`),
+//! - '/' a slash and 'O' an "x"/"\xd7"/"\xb7"/"\xf7" operator (both "por"),
+//! - 'W' a "cu"/"sq" prefix that lends its exponent to the next unit,
+//! - 's' a "\xb2"/"\xb3" superscript on the previous unit,
+//! - '.' a period after a unit or prefix.
 //!
-//! Ported: a number immediately followed by a unit-dictionary word ("60
-//! nudos", "21 millas"); a unit-dictionary word appearing by itself with no
-//! leading number (e.g. a bare "\xe1rea" -- confirmed a real, observed
-//! pattern: the word-unit dictionary at `DAT_10072ec8` (`tables_oth::
-//! UNIT_WORDS`, `tables_oth::unit_word`, transcribed via `pefile`, not by
-//! hand -- see its own doc comment, including the confirmed-dead
-//! `FUN_100338b0`/`DAT_10082060`/`64`/`68` word-dictionary cascade the
-//! engine tries first) recognizes ordinary Spanish words like "hora"/
-//! "minuto"/"segundo"/"pie"/"punto" as units in their own right, so this
-//! chain slot claims them *whenever they appear as a bare word*, not only
-//! after a number -- verified against a fresh capture (`probe/out/
-//! units.jsonl`, "millas por hora": "hora" itself lands at `src=0xa`, not
-//! the plain-word `0x1`)); and now the **range shape** ("2-4 pies", "80-85
-//! grados", "20 a 25 nudos", "1-2 pulgadas") -- see [`range_scan`]/
-//! [`render_range`] and their own doc comments for exactly what's ported
-//! (`FUN_10033050`'s simple range branch, `FUN_10033620`'s dash/word-
-//! conjunction scanner, `FUN_100324d0`'s per-sub-token renderer) and what
-//! isn't (`FUN_10033500`'s comma-list branch, `FUN_10033620`'s own
-//! `/`-between-numbers third shape).
-//!
-//! Not ported: the scanner's other shape families (multi-token compounds
-//! like "kil\xf3metros por hora", parenthesised amounts, currency-linked
-//! units, squared/cubed suffixes via `DAT_10070248`, the dedicated
-//! Celsius/Fahrenheit temperature-symbol special case in `FUN_10032660`
-//! (confirmed dead code, not just unported -- see below), and the
-//! symbol/abbreviation shapes like "NM"/"mph"/"km/h" that don't literally
-//! spell out a `UNIT_WORDS` key (also investigated this round -- see
-//! below)) -- those shapes decline here exactly as the round-1 placeholder
-//! did.
-//!
-//! `FUN_100321c0` (the commit function, read in full): every word it emits
-//! uses `src=0xa` (confirmed literally, `10` at each `FUN_10035350`/
-//! `FUN_100354d0` call site, and against captures: "60 NM"/"5 nudos"/
-//! "80-85 grados"/"2-4 pies" all carry `src=0xa` on the leading number in
-//! the real engine). Its own plural-flag write (`param_1[wordcount*0x54-
-//! 0x45]=1`, the same `+0x12`-on-the-last-record pattern used throughout
-//! this front end) is gated on a flag read from the initial-classification
-//! helper `FUN_10033050` (unread) rather than a direct `FUN_1004c100`
-//! call; ported here as `numwords::plural` on the raw number text, which
-//! is the same rule `FUN_1004c100` itself implements everywhere else it's
-//! called directly. `FUN_100324d0` (an alternate per-token renderer for a
-//! *different*, undeciphered shape family) and `FUN_10032660` (the shape
-//! validator run per candidate shape before commit, with its own
-//! Celsius/Fahrenheit special case gated on `FUN_10041dd0` -- already
-//! ported as `punct::sentence_end`) were both read in full, but neither is
-//! reachable from the two shapes ported here (both bypass the scanner's
-//! own shape-matching/validation machinery entirely), so `sentence_end`
-//! did not need to be made `pub(super)` for this file after all.
-//!
-//! This round: the range shape above is now ported and verified against
-//! fresh captures (it was the single biggest class of full-corpus
-//! mismatches, per the batch's own mismatch-dump classification -- units
-//! numbers tagged `src=0x2` by the fallback chain instead of `src=0xa`).
-//! Several other findings from investigating the *remaining* gaps are worth
-//! recording so the next agent doesn't redo this work:
-//! - **The Celsius/Fahrenheit special case in `FUN_10032660` is dead code,
-//!   confirmed, not just unreachable from the two shapes ported here.**
-//!   Every branch of it (`case 0`'s `cVar2=='P'||'A'||'C'` and `case 1`'s
-//!   `cVar2=='E' && next=='C'` / `cVar2=='C' && next=='P'`) requires a `'C'`
-//!   or `'P'` per-token tag byte (`local_524`/the committed slot's own
-//!   `+0x1a`). Grepping every assignment to that tag in `FUN_10031720`
-//!   shows `'C'`/`'P'` are written *only* inside the `FUN_100338b0`
-//!   three-table cascade (`DAT_10082060`/`64`/`68`) -- and this session
-//!   re-verified independently (fresh `pefile` read, not trusting the prior
-//!   agent's own note) that all three headers are still `0` in this DLL's
-//!   static image. With that cascade dead, `'C'`/`'P'` can never be
-//!   produced, so `FUN_10032660`'s temperature branches can never fire
-//!   either: porting them faithfully is equivalent to not porting them.
-//!   `FUN_10041dd0`/`punct::sentence_end` accordingly still doesn't need to
-//!   be `pub(super)`.
-//! - **The abbreviation table at `0x100702a0`** (`FUN_100438f0`, tag `'W'`,
-//!   gated on `local_4f4==2`) is real -- unlike the `FUN_100338b0` cascade,
-//!   this is a fixed address in `.data`, and `pefile` confirms `DAT_10079e2c`
-//!   (its count) is `2`, not `0`. But it is *not* a general abbreviation
-//!   dictionary: reading the table directly gives exactly two entries,
-//!   `"cu"` -> dash-field `"3"` and `"sq"` -> dash-field `"2"` (a prefix
-//!   table for English-style "cu"/"sq" unit qualifiers, e.g. "cu ft"/"sq
-//!   mi" -- the dash field is fed through `FUN_100505b3`, confirmed to be a
-//!   thin wrapper over `FUN_10050528`, a locale-aware `atoi`, so the
-//!   `"3"`/`"2"` strings become the integer exponents 3/2, landing in the
-//!   same per-slot "exponent" field `FUN_10030220`'s superscript handling
-//!   in `norm_fraction.rs` reads). This does **not** explain "NM"/"kt"/
-//!   "mph": neither string appears in this table, nor in `UNIT_WORDS`, nor
-//!   anywhere reachable through this function's own live tag-assignment
-//!   code. Whatever makes the real engine tag "NM"/"kt"/"mph"-adjacent
-//!   numbers with `src=0xa` (confirmed still happening in a fresh capture:
-//!   "60 NM" -> "sesenta" carries `src=0xa` in the engine but `0x2` from
-//!   this port, i.e. some *other* normalizer's tag) most likely happens at
-//!   the lexicon level (a pronunciation entry for the abbreviation itself,
-//!   outside `text_spa` entirely) rather than in `FUN_10031720` -- a
-//!   genuinely different subsystem, out of this file's scope regardless of
-//!   effort spent here.
-//! - **Ranges are now ported.** They go through a *pre-scan*:
-//!   `FUN_10033050` (the initial-classification helper, called once at
-//!   `FUN_10031720`'s own entry) tries `FUN_10033500` (a comma/"y"-list
-//!   scanner, not ported -- see [`range_scan`]'s own doc) then
-//!   `FUN_10033620` (the dash/en-dash/"a"/"y"/"&"/"al"-conjunction range
-//!   scanner, ported as [`range_scan`]). When it succeeds, the whole matched
-//!   span is re-tokenized and rendered word-by-word by `FUN_100324d0`
-//!   (ported as [`render_range`]) -- `FUN_100321c0`'s own `FUN_10006fe0`
-//!   against `DAT_1006905c` ("NUMS", confirmed via `pefile`) picks this
-//!   function over a `FUN_1004ca30`-on-the-whole-span fallback used by
-//!   `FUN_10033050`'s *other*, prev-word-continuation branch (also not
-//!   ported -- a rarer shape, and using it without reading that branch's own
-//!   struct-field semantics would be guessing). `FUN_1004ca30` itself was
-//!   already available as `numwords::cardinal_to_words`, fully ported and
-//!   verified independently of this work.
-//! - The trailing unit word after a range is always marked plural
-//!   (`FUN_100321c0`'s own `*(short*)(param_3+0x18)!=0` check, unconditional
-//!   whenever `FUN_10033050`'s simple range branch fired -- confirmed via
-//!   decompile, this is *not* `numwords::plural` on any specific number's
-//!   value), and so is the very last word the range itself renders.
-//! - A small, separate 13-line mismatch class was also investigated this
-//!   round ("Detalle de las olas: ... 3 pies a 5 segundos" -> the engine
-//!   reads "cinco" under `norm_time.rs`'s own `src=4`, this crate under
-//!   `src=0xa`): confirmed this is *not* caused by the range work above
-//!   (`range_scan` correctly declines here -- "pies" isn't a conjunction
-//!   right after "3", and there's no conjunction right after "5" either, so
-//!   "5 segundos" reaches the plain bare-number-plus-unit-word shape, which
-//!   was already matching it before this round). `norm_time.rs`'s own
-//!   already-ported `lookback_las_flag` (requiring the word immediately
-//!   before the number be exactly "las") also doesn't explain the real
-//!   engine's behavior here ("a", not "las", precedes "5") -- so either a
-//!   time shape not yet captured in that file's own port explains it, or
-//!   there's a genuine chain-precedence subtlety in the real engine neither
-//!   port currently replicates. Left for whoever owns `norm_time.rs`: fixing
-//!   it there (making time correctly claim "5 segundos" first) is the right
-//!   direction, not loosening this file's own unit-word match.
+//! The tag string is matched against `PTR_DAT_10069370` from the longest
+//! prefix down, each candidate checked by `FUN_10032660`, and the first that
+//! passes is written out by `FUN_100321c0` (src 0xa).
 
+use super::abbrev::{find_i, group_lookup, unit_lookup};
+use super::abbrev_groups::Entry;
+use super::emit::emit_split;
 use super::norm_math::numeric;
-use super::numwords::{cardinal_to_words, emit_phrase, is_comma_grouped, is_period_grouped, plural, G_F, G_M};
-use super::tables_oth::unit_word;
+use super::numwords::{cardinal_to_words, is_comma_grouped, is_period_grouped, plural};
+use super::punct::{prev_words, sentence_end_code};
 use super::tokenize::{tokenize, Tok};
-use super::{emit, FeSpa};
-use crate::ling_spa::lexicon::stricmp_spa;
+use super::{emit, rec, FeSpa};
+use crate::ling_spa::lexicon::{stricmp_spa, strnicmp_spa};
 use crate::ling_spa::WaSpa;
 
 const SRC: u32 = 0xa;
 
-/// `DAT_10064530` ("a") and `DAT_100644d0` ("y"), confirmed via `pefile`
-/// (see the module doc): the words a literal hyphen/en-dash/em-dash and a
-/// literal `/`/`&` get read out as, inside a matched range span.
+/// `DAT_10069224`.
+const POR: &[u8] = b"por";
+/// `DAT_10069090`.
+const AL: &[u8] = b"al";
+/// `DAT_10064530` / `DAT_100644d0`.
 const RANGE_A: &[u8] = b"a";
 const RANGE_Y: &[u8] = b"y";
+/// `DAT_1006905c`: the leading amount is a range or list, rendered per token.
+const NUMS: &[u8] = b"NUMS";
 
-/// `FUN_10033620`: the dash/en-dash/em-dash/"a"/"y"/"&"/"al"-conjunction
-/// range scanner ("2-4", "80-85", "20 a 25", "5 al 10"). `tok` is the
-/// already-tokenized leading number (the caller's own entry token, matching
-/// `FUN_10033050`'s reuse of its own already-tokenized `param_3` rather than
-/// re-tokenizing). Returns the total byte length from `off` through the end
-/// of the second number, or `None` if this isn't a range.
-///
-/// `FUN_10033620`'s own `'/'`-between-numbers third shape (e.g. "5/10
-/// grados") is not ported: with `norm_units.rs` running before
-/// `norm_fraction.rs` in the chain, declining it here means a bare "N/N"
-/// falls through to the already-verified fraction shape instead of being
-/// treated as a range -- a real, documented divergence, not an oversight,
-/// and a narrow one (NWS text uses "a"/"-" for ranges, not "/").
-///
-/// The scanner's own peek-only trailing degree/percent-symbol validation
-/// (after the second number, gating class==6/'\xb0' or class==3/'%', but
-/// never consuming either) is also not replicated: it only *validates* that
-/// something reasonable follows, and this function's own caller already
-/// requires a real `UNIT_WORDS` match at that exact position, which is a
-/// strictly narrower, equivalent gate for every case that matters here.
-fn range_scan(t: &[u8], p: usize, off: i32, tok: &Tok) -> Option<i32> {
-    if tok.class != 2 || !numeric(tok.text()) {
-        return None;
-    }
-    let mut len = tok.consumed;
-    let p1 = p + len as usize;
-    let off1 = off + len;
-    let (conj, r1) = tokenize(t, p1, off1, 0xb);
-    if r1 == 0 {
-        return None;
-    }
-    let ctext = conj.text();
-    let word_conj = (matches!(ctext, b"a" | b"y" | b"&") && conj.len == 1) || stricmp_spa(ctext, b"al") == 0;
-    let dash_conj = matches!(ctext.first(), Some(&(b'-' | 0x96 | 0x97))) && conj.len == 1;
+/// `0x100702a0` (`DAT_10079e2c` = 2): prefix, name, exponent.
+const CU_SQ: [Entry; 2] = [(b"cu", b"c\xfabico", b"3", 0), (b"sq", b"cuadrado", b"2", 0)];
 
-    if word_conj && conj.ws < 2 {
-        len += r1;
-        let p2 = p1 + r1 as usize;
-        let off2 = off1 + r1;
-        let (num2, r2) = tokenize(t, p2, off2, 0xb);
-        if r2 == 0 || !numeric(num2.text()) || num2.ws > 1 {
-            return None;
-        }
-        return Some(len + r2);
-    }
-    if dash_conj && conj.ws < 2 {
-        len += r1;
-        let p2 = p1 + r1 as usize;
-        let off2 = off1 + r1;
-        let (num2, r2) = tokenize(t, p2, off2, 0xb);
-        if r2 == 0 || !numeric(num2.text()) || num2.ws > 1 {
-            return None;
-        }
-        return Some(len + r2);
-    }
-    None
+/// `DAT_10070248` (`DAT_10079e28` = 2, stride 0x2a): superscript, name.
+const SUP: [(u8, &[u8]); 2] = [(0xb2, b"cuadrado"), (0xb3, b"c\xfabico")];
+
+/// `PTR_DAT_10069370` (`DAT_10069388` = 6).
+const PATTERNS: [&[u8]; 6] = [b"$/A", b"A", b"AA", b"A/A", b"AOA", b"AOA/A"];
+
+/// `FUN_10032c50`'s context tables.
+const CTX_W: [&[u8]; 2] = [b"bulbo", b"bulbos"];
+const CTX_M: [&[u8]; 5] = [b"cm", b"larga", b"largas", b"largo", b"largos"];
+const CTX_N: [&[u8]; 4] = [b"kg", b"lb", b"poder", b"poders"];
+const CTX_CFKR: [&[u8]; 6] = [b"CF", b"K", b"R", b"grado", b"grados", b"\xb0"];
+const CTX_S: [&[u8]; 22] = [
+    b"a.m",
+    b"am",
+    b"de la ma\xf1ana",
+    b"de la noche",
+    b"de la tarde",
+    b"en la ma\xf1ana",
+    b"en la noche",
+    b"en la tarde",
+    b"h",
+    b"hora",
+    b"horas",
+    b"hrs",
+    b"minuto",
+    b"minutos",
+    b"p.m",
+    b"pm",
+    b"por la ma\xf1ana",
+    b"por la noche",
+    b"por la tarde",
+    b"segundo",
+    b"segundos",
+    b"tiempo",
+];
+const CTX_GT: [&[u8]; 6] = [b"gramo", b"gramos", b"kilogramo", b"kilogramos", b"peso", b"pesos"];
+
+/// The leading amount (`local_4c0`).
+#[derive(Clone, Default)]
+struct Pre {
+    ws: i32,
+    start: i32,
+    end: i32,
+    len: i32,
+    class: i32,
+    /// +0x18.
+    plural: bool,
+    /// +0x1c: where the amount's text starts.
+    pos: usize,
+    /// +0x20.
+    text: Vec<u8>,
+    /// +0x152: the previous word is a currency amount.
+    dollar: bool,
 }
 
-/// `FUN_100324d0`: re-tokenize the raw span `t[p..p+span_len]` (a matched
-/// range, see [`range_scan`]) and emit each sub-token as its own word,
-/// `src=0xa` throughout, exactly as the engine's own commit dispatch does
-/// (`FUN_100321c0`'s own `FUN_10006fe0` vs. `DAT_1006905c` ("NUMS", the
-/// marker `FUN_10033050`'s simple range branch writes) check, confirmed via
-/// `pefile`, picks this function over the `FUN_1004ca30`-on-the-whole-span
-/// fallback used by the *other*, prev-word-continuation branch of
-/// `FUN_10033050` -- not ported here, see the module doc): a number renders
-/// via `cardinal_to_words` with `gender`; a plain word (the literal "a"/"y"/
-/// "al" text) is emitted as itself; a `-` symbol reads as "a", a `/` or `&`
-/// symbol reads as "y"; an en-dash/em-dash (raw high byte 0x96/0x97) reads
-/// as "a"; anything else is silently skipped. Marks the very last word this
-/// emits as plural (`FUN_100321c0`'s own `if (*(short*)(param_3+0x18)!=0) {
-/// mark last record plural }` right after this call, unconditional on
-/// whether a range was found at all -- the same `local_4c0[6]` flag
-/// `FUN_10033050` always sets for its simple range branch that also makes
-/// the trailing unit word plural, see the caller; confirmed via decompile,
-/// not derived from "5 a 10 nudos" carrying the flag on "diez" but not on
-/// "cinco").
-fn render_range(wa: &mut WaSpa, t: &[u8], p: usize, off: i32, span_len: i32, gender: i32) -> bool {
-    let mut pos = p;
-    let mut o = off;
-    let mut done = 0;
-    while done < span_len {
-        let (sub, r) = tokenize(t, pos, o, 0xb);
-        if r == 0 {
+/// One unit token (0x140 bytes each in the WA scratch area).
+#[derive(Clone, Default)]
+struct Slot {
+    ws: i32,
+    start: i32,
+    end: i32,
+    len: i32,
+    class: i32,
+    gender: u8,
+    tag: u8,
+    /// +0x1c: exponent + 2 index ("cuadrado"/"c\xfabico").
+    exp: i16,
+    /// +0x1e: a '.' followed.
+    dot: i16,
+    /// +0x20.
+    plural: bool,
+    /// +0x24: text position after the token.
+    after: usize,
+    /// +0x28.
+    text: Vec<u8>,
+    /// +0x46.
+    render: Vec<u8>,
+}
+
+/// `local_100`: the render buffer. Only its first byte is ever cleared, and
+/// `FUN_10032660` reads bytes 12..16 as an int (`param_2 + 0x3cc`), so the
+/// residue of longer renders is kept. The stack garbage it starts with is
+/// modelled as zeros.
+struct Buf([u8; 256]);
+
+impl Buf {
+    fn set(&mut self, s: &[u8]) {
+        let n = s.len().min(255);
+        self.0[..n].copy_from_slice(&s[..n]);
+        self.0[n] = 0;
+    }
+
+    fn get(&self) -> &[u8] {
+        let n = self.0.iter().position(|&c| c == 0).unwrap_or(256);
+        &self.0[..n]
+    }
+
+    fn residue(&self) -> i32 {
+        i32::from_le_bytes([self.0[12], self.0[13], self.0[14], self.0[15]])
+    }
+}
+
+fn c0(tok: &Tok) -> u8 {
+    tok.text[0]
+}
+
+fn upper(c: u8) -> u8 {
+    c.to_ascii_uppercase()
+}
+
+/// `FUN_10033500(tok, t+p, off)`: "N, N y N" lists; the bytes up to the
+/// last number, or -1.
+fn list_scan(tok: &Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    if tok.class != 2 || !numeric(tok.text()) {
+        return -1;
+    }
+    let mut i = tok.consumed;
+    let (nt, c) = tokenize(t, p + i as usize, off + i, 0xb);
+    if c == 0 || c0(&nt) != b',' || nt.len != 1 || nt.ws >= 2 {
+        return -1;
+    }
+    let mut state = 1u8;
+    i += c;
+    if t[p + i as usize] == 0 {
+        return -1;
+    }
+    loop {
+        let (nt, c) = tokenize(t, p + i as usize, off + i, 0xb);
+        if c == 0 {
+            return -1;
+        }
+        if state != 0 && numeric(nt.text()) && nt.ws <= 1 {
+            if state == 2 {
+                return i + c;
+            }
+            state = 0;
+        } else {
+            if state != 0 || (c0(&nt) != b',' && c0(&nt) != b'y') || nt.len != 1 || nt.ws > 1 {
+                return -1;
+            }
+            state = if c0(&nt) != b',' { 2 } else { 1 };
+        }
+        i += c;
+        if t[p + i as usize] == 0 {
+            return -1;
+        }
+    }
+}
+
+/// The token after a range's second number must be a word, "\xb0" or "%".
+fn range_tail(t: &[u8], p: usize, off: i32, i: i32) -> i32 {
+    let (nt, _) = tokenize(t, p + i as usize, off + i, 0xb);
+    match nt.class {
+        6 if nt.len == 1 && c0(&nt) == 0xb0 => i,
+        3 if nt.len == 1 && c0(&nt) == b'%' => i,
+        1 => i,
+        _ => -1,
+    }
+}
+
+/// `FUN_10033620(tok, t+p, off)`: "N a N", "N y N", "N & N", "N al N",
+/// "N-N" and "N / N" ranges; the bytes up to the second number, or -1.
+fn range_scan(tok: &Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    if tok.class != 2 || !numeric(tok.text()) {
+        return -1;
+    }
+    let mut i = tok.consumed;
+    let (nt, c) = tokenize(t, p + i as usize, off + i, 0xb);
+    if c == 0 {
+        return -1;
+    }
+    let k = c0(&nt);
+    if ((matches!(k, b'a' | b'y' | b'&') && nt.len == 1) || stricmp_spa(nt.text(), AL) == 0) && nt.ws < 2 {
+        i += c;
+        let (n2, c2) = tokenize(t, p + i as usize, off + i, 0xb);
+        if c2 == 0 || !numeric(n2.text()) || n2.ws > 1 {
+            return -1;
+        }
+        return i + c2;
+    }
+    if matches!(k, b'-' | 0x96 | 0x97) && nt.len == 1 && nt.ws >= 0 && nt.ws < 2 {
+        i += c;
+        let (n2, c2) = tokenize(t, p + i as usize, off + i, 0xb);
+        if c2 == 0 || !numeric(n2.text()) || n2.ws < 0 || n2.ws > 1 {
+            return -1;
+        }
+        return range_tail(t, p, off, i + c2);
+    }
+    if k != b'/' || nt.len != 1 || nt.ws != 1 {
+        return -1;
+    }
+    i += c;
+    let (n2, c2) = tokenize(t, p + i as usize, off + i, 0xb);
+    if c2 == 0 || !numeric(n2.text()) || n2.ws != 1 {
+        return -1;
+    }
+    range_tail(t, p, off, i + c2)
+}
+
+/// `FUN_1004bfe0(best, last, s, off, 0)`: tokenize all of `s`; `best` is the
+/// last non-empty token that stops short of the end, `last` the final one.
+pub(super) fn best_and_last(s: &[u8], off: i32, mode: i32) -> (Tok, Tok) {
+    let mut best = Tok::default();
+    let mut last = Tok::default();
+    if s.is_empty() {
+        return (best, last);
+    }
+    let mut b = s.to_vec();
+    b.extend_from_slice(&[0u8; 8]);
+    let total = s.len() as i32;
+    let mut acc = 0i32;
+    while acc < total {
+        let (tk, c) = tokenize(&b, acc as usize, off + acc, mode);
+        if c + acc < total && tk.len != 0 {
+            best = tk.clone();
+        }
+        last = tk;
+        if c == 0 {
             break;
         }
+        acc += c;
+    }
+    (best, last)
+}
+
+fn last_rec(wa: &WaSpa) -> Option<usize> {
+    let n = wa.i16(0);
+    if n >= 1 {
+        Some(WaSpa::rec(n as usize - 1))
+    } else {
+        None
+    }
+}
+
+/// `FUN_10033050(pre, wa, tok, t+p, off)`: the leading amount. Returns its
+/// length, -1 when it is the previous word (already written), or 0.
+fn pre_scan(wa: &WaSpa, tok: &Tok, t: &[u8], p: usize, off: i32) -> (Pre, i32) {
+    let mut pre = Pre::default();
+    let grouped = tok.class == 2 && (is_period_grouped(tok.text()) || is_comma_grouped(tok.text()));
+    if grouped {
+        let mut r = list_scan(tok, t, p, off);
+        if r < 0 {
+            r = range_scan(tok, t, p, off);
+        }
+        if r >= 0 {
+            pre.ws = tok.ws;
+            pre.start = off;
+            pre.end = r + off;
+            pre.len = r - tok.ws;
+            pre.class = 2;
+            pre.text = NUMS.to_vec();
+            pre.pos = p;
+            pre.plural = true;
+            return (pre, r);
+        }
+        let mut r = tok.consumed;
+        let (nt, c) = tokenize(t, p + r as usize, off + r, 0);
+        if c == 0 || nt.class == 10 {
+            return (pre, 0);
+        }
+        if matches!(nt.class, 3 | 8) && nt.len == 1 && c0(&nt) == b'-' && nt.ws < 2 {
+            r += c;
+        }
+        pre.ws = tok.ws;
+        pre.start = tok.start;
+        pre.end = tok.end;
+        pre.len = tok.len;
+        pre.class = 2;
+        pre.text = tok.text().to_vec();
+        pre.plural = plural(tok.text());
+        return (pre, r);
+    }
+
+    let (w, back) = prev_words(t, p - off as usize, p, 2);
+    if back == 0 {
+        return (pre, 0);
+    }
+    let (best, last) = best_and_last(&w, off - back as i32, 0);
+    let from = |pre: &mut Pre, tk: &Tok, class: i32| {
+        pre.ws = tk.ws;
+        pre.start = tk.start;
+        pre.end = tk.end;
+        pre.len = tk.len;
+        pre.class = class;
+        pre.text = tk.text().to_vec();
+    };
+    let src_num = |r: usize| matches!(wa.i32(r + rec::SRC), 0x11 | 0xe);
+    if best.len < 1 {
+        if last.len < 1 {
+            return (pre, 0);
+        }
+    } else {
+        if last.len < 1 {
+            return (pre, 0);
+        }
+        if let Some(r) = last_rec(wa) {
+            if src_num(r)
+                && wa.i32(r + rec::END) == best.end
+                && matches!(last.class, 3 | 8)
+                && last.len == 1
+                && c0(&last) == b'-'
+                && last.ws < 2
+                && off - last.end < 2
+            {
+                from(&mut pre, &best, 1);
+                return (pre, -1);
+            }
+        }
+    }
+    let lr = last_rec(wa);
+    if last.class == 1 && (stricmp_spa(last.text(), b"un") == 0 || stricmp_spa(last.text(), b"una") == 0) {
+        if let Some(r) = lr {
+            if wa.i32(r + rec::START) == last.start && wa.i32(r + rec::END) == last.end {
+                from(&mut pre, &last, last.class);
+                return (pre, -1);
+            }
+        }
+    }
+    let Some(r) = lr else { return (pre, 0) };
+    if last.len < 1 {
+        return (pre, 0);
+    }
+    if src_num(r) && wa.i32(r + rec::END) == last.end && last.ws < 2 && off - last.end < 2 {
+        from(&mut pre, &last, 1);
+        return (pre, -1);
+    }
+    if wa.i32(r + rec::SRC) != 5 || wa.i32(r + rec::END) != last.end || off - last.end > 2 {
+        return (pre, 0);
+    }
+    pre.dollar = true;
+    (pre, -1)
+}
+
+/// `FUN_10043bf0(table, words, n, 'I', max)`: the first of `words` that
+/// starts a key, the key's later words matched against the following ones.
+pub(super) fn phrase_find(table: &[&[u8]], words: &[Vec<u8>], max: usize) -> bool {
+    for i in 0..max {
+        let Some(w) = words.get(i) else { return false };
+        if w.is_empty() {
+            return false;
+        }
+        let (mut lo, mut hi) = (0i32, table.len() as i32 - 1);
+        let mut sum = hi;
+        while lo <= hi {
+            let mid = sum / 2;
+            let key = table[mid as usize];
+            let c = strnicmp_spa(key, w, w.len());
+            if c == 0 {
+                let nx = key.get(w.len()).copied().unwrap_or(0);
+                if nx == 0 {
+                    return true;
+                }
+                let mut cmp = 0;
+                if nx == b' ' {
+                    let mut rest = &key[w.len() + 1..];
+                    for wj in words.iter().take(max).skip(i + 1) {
+                        let cj = strnicmp_spa(rest, wj, wj.len());
+                        if cj != 0 {
+                            cmp = cj;
+                            break;
+                        }
+                        let a = rest.get(wj.len()).copied().unwrap_or(0);
+                        if a == 0 {
+                            return true;
+                        }
+                        if a != b' ' {
+                            break;
+                        }
+                        rest = &rest[wj.len() + 1..];
+                    }
+                }
+                if cmp < 0 {
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            } else if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+            sum = lo + hi;
+        }
+    }
+    false
+}
+
+/// `FUN_10032c50(unit, t+p0, off0, 'B', consumed)`: a one-letter group-C unit
+/// is confirmed by a context word among the five tokens before the amount or
+/// the five after the units.
+fn context(unit: &[u8], t: &[u8], p0: usize, off0: i32, consumed: i32) -> bool {
+    let mut left: Vec<Vec<u8>> = Vec::new();
+    let (w, back) = prev_words(t, p0 - off0 as usize, p0, 5);
+    if back != 0 && !w.is_empty() {
+        let mut b = w.clone();
+        b.extend_from_slice(&[0u8; 8]);
+        let mut bufs: [Vec<u8>; 5] = Default::default();
+        let mut cnt = 0usize;
+        let mut acc = 0usize;
+        while acc < w.len() {
+            let (tk, c) = tokenize(&b, acc, acc as i32, 0xb);
+            if cnt > 0 {
+                for j in (1..=cnt).rev() {
+                    bufs[j] = bufs[j - 1].clone();
+                }
+            }
+            bufs[0] = tk.text().to_vec();
+            if cnt < 4 {
+                cnt += 1;
+            }
+            if c == 0 {
+                break;
+            }
+            acc += c as usize;
+        }
+        for b in bufs.iter() {
+            if b.is_empty() {
+                break;
+            }
+            left.push(b.clone());
+        }
+    }
+    let mut right: Vec<Vec<u8>> = Vec::new();
+    let mut q = p0 + consumed as usize;
+    let mut o = off0 + consumed;
+    while right.len() < 5 {
+        let (tk, c) = tokenize(t, q, o, 0xb);
+        if c == 0 || tk.class == 9 || tk.class == 10 {
+            break;
+        }
+        q += c as usize;
+        o += c;
+        right.push(tk.text().to_vec());
+    }
+    if unit.len() != 1 {
+        return false;
+    }
+    let u = upper(unit[0]);
+    let hit = |tab: &[&[u8]]| phrase_find(tab, &left, 5) || phrase_find(tab, &right, 5);
+    (u == b'W' && hit(&CTX_W))
+        || (u == b'M' && hit(&CTX_M))
+        || (u == b'N' && hit(&CTX_N))
+        || (matches!(u, b'C' | b'F' | b'K' | b'R') && hit(&CTX_CFKR))
+        || (u == b'S' && hit(&CTX_S))
+        || (matches!(u, b'G' | b'T') && hit(&CTX_GT))
+}
+
+fn is_un(s: &[u8]) -> bool {
+    stricmp_spa(s, b"un") == 0 || stricmp_spa(s, b"una") == 0
+}
+
+/// `FUN_10032660(slots, pre, pattern, ctx)`.
+fn validate(s: &mut [Slot], pre: &Pre, k: usize, ctx: bool, residue: i32, t: &[u8]) -> bool {
+    if k > 0 && pre.len > 0 {
+        if pre.class == 1 {
+            if s[0].ws > 2 {
+                return false;
+            }
+        } else if s[0].ws > 1 {
+            return false;
+        }
+    }
+    match k {
+        1 => {
+            let tag = s[0].tag;
+            if tag == b'P' || tag == b'A' {
+                if s[0].exp < 1 {
+                    if pre.len < 1 {
+                        return false;
+                    }
+                    if is_un(&pre.text) && (stricmp_spa(&s[0].text, b"MS") == 0 || stricmp_spa(&s[0].text, b"ATM") == 0) {
+                        return false;
+                    }
+                    if [&b"in"[..], b"dam", b"fur", b"ha"].iter().any(|w| stricmp_spa(&s[0].text, w) == 0) {
+                        let (nt, _) = tokenize(t, s[0].after, 0, 0xb);
+                        let dot = c0(&nt) == b'.' && nt.ws == 0 && nt.len == 1;
+                        if !ctx && (!dot || sentence_end_code(&nt, t, s[0].after, 0) == b'P') && (residue < 1 || s[0].ws != 0) {
+                            return false;
+                        }
+                    }
+                }
+            } else if tag == b'C' && s[0].exp < 1 && !ctx {
+                return false;
+            }
+            true
+        }
+        2 => {
+            if s[0].tag == b'E' && s[1].tag == b'C' {
+                if s[1].dot != 0 {
+                    s[1].len -= 1;
+                }
+                let u = upper(s[1].text.first().copied().unwrap_or(0));
+                if s[1].len == 1 {
+                    if u == b'C' {
+                        s[1].render = b"celsius".to_vec();
+                        return true;
+                    }
+                    if u == b'F' {
+                        return true;
+                    }
+                } else if s[1].len != 2 {
+                    return false;
+                }
+                u == b'R'
+            } else if s[0].tag == b'C' && s[1].tag == b'P' {
+                let fl = stricmp_spa(&s[0].text, b"fl") == 0 || stricmp_spa(&s[0].text, b"t") == 0;
+                let oz = stricmp_spa(&s[1].text, b"oz") == 0 || stricmp_spa(&s[1].text, b"ozs") == 0;
+                if !(fl && oz) {
+                    return false;
+                }
+                s[0].render = if s[1].len == 2 { b"onza".to_vec() } else { b"onzas".to_vec() };
+                let troy = s[0].len == 1 && upper(s[0].text[0]) == b'T';
+                s[1].render = if troy { b"troy".to_vec() } else { b"l\xedquida".to_vec() };
+                true
+            } else {
+                false
+            }
+        }
+        3 | 4 => {
+            if s[1].ws != s[2].ws {
+                return false;
+            }
+            if s[0].tag == b'C' && s[2].tag == b'C' && s[0].exp < 1 && s[2].exp < 1 {
+                if !ctx && pre.len == 0 {
+                    return false;
+                }
+                if pre.len > 0 && is_un(&pre.text) {
+                    return false;
+                }
+                if s[1].ws != 0 {
+                    return false;
+                }
+                if k == 3 {
+                    if s[0].len == 1 && s[2].len == 1 {
+                        let (a, b) = (s[0].text[0], s[2].text[0]);
+                        if (a == b'C' && b == b'C') || (a == b'M' && b == b'V') {
+                            return false;
+                        }
+                    }
+                } else if s[0].ws == 0 && pre.len > 0 && residue == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+        5 => s[3].ws == s[4].ws,
+        _ => true,
+    }
+}
+
+fn mark_plural(wa: &mut WaSpa) {
+    if let Some(r) = last_rec(wa) {
+        wa.set_i16(r + 0x12, 1);
+    }
+}
+
+/// `FUN_100324d0`: a range or list amount, one word per token.
+fn render_nums(wa: &mut WaSpa, t: &[u8], pre: &Pre, gender: u8) -> bool {
+    let span = pre.end - pre.start;
+    let mut pos = pre.pos;
+    let mut o = pre.start;
+    let mut done = 0;
+    while done < span {
+        let (sub, r) = tokenize(t, pos, o, 0xb);
         let ok = match sub.class {
             2 => {
-                let mut word = Vec::new();
-                cardinal_to_words(&mut word, sub.text(), gender);
-                emit_phrase(wa, &word, sub.start, sub.end, b'D', b'D', SRC)
+                let mut w = Vec::new();
+                cardinal_to_words(&mut w, sub.text(), gender as i32);
+                emit_split(wa, &w, sub.start, sub.end, b'D', b'D', SRC)
             }
             1 => emit(wa, sub.text(), sub.start, sub.end, b'A', b'D', SRC, None),
-            3 => match sub.text().first() {
-                Some(b'-') => emit(wa, RANGE_A, sub.start, sub.end, b'A', b'D', SRC, None),
-                Some(b'/' | b'&') => emit(wa, RANGE_Y, sub.start, sub.end, b'A', b'D', SRC, None),
+            3 => match c0(&sub) {
+                b'-' => emit(wa, RANGE_A, sub.start, sub.end, b'A', b'D', SRC, None),
+                b'/' | b'&' => emit(wa, RANGE_Y, sub.start, sub.end, b'A', b'D', SRC, None),
                 _ => true,
             },
-            6 if matches!(sub.text().first(), Some(&(0x96 | 0x97))) => {
-                emit(wa, RANGE_A, sub.start, sub.end, b'A', b'D', SRC, None)
-            }
+            6 if matches!(c0(&sub), 0x96 | 0x97) => emit(wa, RANGE_A, sub.start, sub.end, b'A', b'D', SRC, None),
             _ => true,
         };
         if !ok {
             return false;
         }
+        if r == 0 {
+            break;
+        }
         done += r;
         pos += r as usize;
         o += r;
     }
-    let n = wa.i16(0) as usize;
-    if n > 0 {
-        wa.set_i16(WaSpa::rec(n - 1) + 0x12, 1);
+    true
+}
+
+/// `FUN_100321c0`: write the amount and the matched units.
+fn commit(wa: &mut WaSpa, s: &[Slot], n: usize, pre: &Pre, t: &[u8]) -> bool {
+    let amount = pre.len > 0 && pre.class == 2;
+    if amount {
+        if pre.text == NUMS {
+            if !render_nums(wa, t, pre, s[0].gender) {
+                return false;
+            }
+        } else {
+            let mut w = Vec::new();
+            cardinal_to_words(&mut w, &pre.text, s[0].gender as i32);
+            if !emit_split(wa, &w, pre.start, pre.end, b'D', b'D', SRC) {
+                return false;
+            }
+        }
+        if pre.plural {
+            mark_plural(wa);
+        }
+    }
+    for (i, u) in s.iter().enumerate().take(n) {
+        if u.len <= 0 {
+            continue;
+        }
+        if i == 0 && amount {
+            if let Some(r) = last_rec(wa) {
+                let last = wa.cstr(r + rec::TEXT).to_vec();
+                if stricmp_spa(&last, b"uno") == 0 || stricmp_spa(&last, b"un") == 0 || stricmp_spa(&last, b"una") == 0 {
+                    if u.gender == b'M' {
+                        wa.set_i32(r + rec::LEN, 2);
+                        wa.strcpy(r + rec::TEXT, b"un");
+                    } else {
+                        wa.strcpy(r + rec::TEXT, b"una");
+                    }
+                }
+            }
+        }
+        match u.tag {
+            b'/' | b'O' | b'S' => {
+                if !emit_split(wa, &u.render, u.start, u.end, b'S', b'D', SRC) {
+                    return false;
+                }
+            }
+            b'a' => {
+                if !emit(wa, &u.text, u.start, u.end, b'A', b'D', SRC, None) {
+                    return false;
+                }
+            }
+            _ => {
+                if !emit_split(wa, &u.render, u.start, u.end, b'A', b'D', SRC) {
+                    return false;
+                }
+                if u.plural {
+                    mark_plural(wa);
+                }
+            }
+        }
+        if u.exp > 0 {
+            let name = SUP[(u.exp - 2).clamp(0, 1) as usize].1;
+            if !emit(wa, AL, u.start, u.end, b'A', b'D', SRC, None) || !emit_split(wa, name, u.start, u.end, b'D', b'D', SRC) {
+                return false;
+            }
+        }
     }
     true
 }
 
+enum Step {
+    Commit,
+    Skip,
+    Stop,
+}
+
 pub fn units(_fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
-    // Bare unit word, no leading number (e.g. a lone "\xe1rea"). Origin 'A'
-    // (`FUN_100321c0`'s own default, non-slash/O/S per-token emit), not 'D'.
-    if tok.class == 1 {
-        let Some((word, _fem)) = unit_word(tok.text()) else {
-            return -1;
+    let mut s: Vec<Slot> = vec![Slot::default(); 6];
+    let mut t524 = [0u8; 32];
+    let mut t53c = [0u8; 8];
+    let (mut u10, mut u11) = (0usize, 0usize);
+    let mut gender = b'M';
+    let mut buf = Buf([0u8; 256]);
+    // Pending "cu"/"sq" prefix (`local_240`).
+    let (mut w_ws, mut w_start, mut w_len, mut w_exp, mut w_dot) = (0i32, 0i32, 0i32, 0i16, 0i16);
+
+    let (pre, r) = pre_scan(wa, tok, t, p, off);
+    let (mut p3, mut p4) = (p, off);
+    let mut l540 = r;
+    let mut plural544 = 0i16;
+    if r == -1 {
+        if pre.dollar {
+            t524[0] = b'$';
+            t53c[0] = b'$';
+            u10 = 1;
+            u11 = 1;
+        }
+        l540 = 0;
+    } else if r > 0 {
+        p3 += r as usize;
+        p4 += r;
+    }
+    if r != 0 && pre.plural {
+        plural544 = 1;
+    }
+
+    let mut u7 = l540;
+    while u11 < 5 {
+        let cur: Tok;
+        let mut l534: i32;
+        if u7 < 1 {
+            cur = tok.clone();
+            l534 = tok.consumed;
+            u7 = l540;
+        } else {
+            let (tk, c) = tokenize(t, p3, p4, 0xb);
+            if c == 0 || tk.class == 10 {
+                break;
+            }
+            cur = tk;
+            l534 = c;
+        }
+        let ch = c0(&cur);
+        let step: Step = 'body: {
+            if matches!(cur.class, 3 | 8) && cur.len == 1 && ch == b'/' {
+                t524[u10] = b'/';
+                t53c[u11] = b'/';
+                buf.set(POR);
+                break 'body Step::Commit;
+            }
+            let dot = ch == b'.' && cur.ws == 0 && cur.len == 1;
+            let mut x_check = !dot;
+            if dot {
+                let after_unit = u11 >= 1 && t53c[u11 - 1] == b'A' && t524[u10 - 1] != 0;
+                if after_unit && b"EPC".contains(&t524[u10 - 1]) {
+                    t524[u10] = b'.';
+                    p3 += l534 as usize;
+                    p4 += l534;
+                    s[u11 - 1].dot = 1;
+                    break 'body Step::Skip;
+                }
+                if u10 >= 1 {
+                    if t524[u10 - 1] == b'W' {
+                        p3 += l534 as usize;
+                        u7 += l534;
+                        p4 += l534;
+                        t524[u10] = b'.';
+                        w_len += 1;
+                        w_dot = 1;
+                        l540 = u7;
+                        break 'body Step::Skip;
+                    }
+                    x_check = true;
+                }
+            }
+            if x_check && u10 >= 1 {
+                let x = (upper(ch) == b'X' || ch == 0xb7 || ch == 0xd7 || ch == 0xf7) && cur.len == 1 && cur.ws < 2;
+                if x {
+                    t524[u10] = b'O';
+                    t53c[u11] = b'O';
+                    buf.set(POR);
+                    break 'body Step::Commit;
+                }
+            }
+            // LAB_10031a43
+            if u11 > 0 && t53c[u11 - 1] == b'A' && cur.class == 6 && cur.len == 1 && cur.ws == 0 {
+                if let Some(i) = SUP.iter().position(|&(c, _)| c == ch) {
+                    u7 += l534;
+                    p4 += l534;
+                    p3 += l534 as usize;
+                    t524[u10] = b's';
+                    s[u11 - 1].end += 1;
+                    s[u11 - 1].len += 1;
+                    s[u11 - 1].exp = i as i16 + 2;
+                    l540 = u7;
+                    break 'body Step::Skip;
+                }
+            }
+            let text = cur.text().to_vec();
+            if w_len == 0 && cur.class == 1 && cur.len == 2 {
+                if let Some(i) = find_i(&CU_SQ, &text) {
+                    w_ws = cur.ws;
+                    w_start = cur.start;
+                    w_len = cur.len;
+                    t524[u10] = b'W';
+                    w_exp = CU_SQ[i].2[0] as i16 - b'0' as i16;
+                    u7 += l534;
+                    p4 += l534;
+                    p3 += l534 as usize;
+                    l540 = u7;
+                    break 'body Step::Skip;
+                }
+            }
+            let mode = plural544;
+            let mut out = Vec::new();
+            let mut tag = 0u8;
+            if matches!(cur.class, 1 | 3 | 6) && group_lookup(0, Some(&mut out), &text, mode, Some(&mut gender)) {
+                tag = b'E';
+            } else if cur.class == 1 {
+                if group_lookup(1, Some(&mut out), &text, mode, Some(&mut gender)) {
+                    tag = b'P';
+                } else if group_lookup(2, Some(&mut out), &text, mode, Some(&mut gender)) {
+                    tag = b'C';
+                }
+            }
+            if tag != 0 {
+                buf.set(&out);
+            } else {
+                buf.0[0] = 0;
+                if unit_lookup(Some(&mut out), &text, t, p3, u7, &mut l534, Some(&mut gender)) {
+                    buf.set(&out);
+                    tag = b'E';
+                } else {
+                    if u11 == 2 && t53c[0] == b'$' && t53c[1] == b'/' && cur.class == 1 && s[1].ws == 0 {
+                        t524[u10] = b'a';
+                        t53c[2] = b'A';
+                        break 'body Step::Commit;
+                    }
+                    break 'body Step::Stop;
+                }
+            }
+            t524[u10] = tag;
+            t53c[u11] = b'A';
+            if mode != 0 {
+                plural544 = 0;
+                s[u11].plural = true;
+            }
+            if w_len > 0 && (t524[u10 - 1] == b'W' || (t524[u10 - 1] == b'.' && w_dot != 0)) {
+                s[u11].ws = w_ws;
+                s[u11].start = w_start;
+                s[u11].exp = w_exp;
+                w_ws = 0;
+                w_start = 0;
+                w_len = 0;
+                w_exp = 0;
+                w_dot = 0;
+            }
+            s[u11].gender = gender;
+            if gender == b'F' {
+                gender = b'M';
+            }
+            Step::Commit
         };
-        if !emit_phrase(wa, &word, tok.start, tok.end, b'A', b'D', SRC) {
-            return 0;
-        }
-        return tok.consumed;
-    }
-
-    if tok.class != 2 {
-        return -1;
-    }
-    let num_text = tok.text().to_vec();
-    if !is_period_grouped(&num_text) && !is_comma_grouped(&num_text) {
-        return -1;
-    }
-
-    // Range shape ("2-4 pies", "80-85 grados", "20 a 25 nudos"): tried
-    // before the plain number+word shape below, matching `FUN_10033050`'s
-    // own precedence (it runs once at `FUN_10031720`'s entry, ahead of the
-    // main per-token scan that the plain shape corresponds to).
-    if let Some(span_len) = range_scan(t, p, off, tok) {
-        let p_after = p + span_len as usize;
-        let off_after = off + span_len;
-        let (range_unit_tok, r1) = tokenize(t, p_after, off_after, 0xb);
-        if range_unit_tok.class == 1 {
-            if let Some((unit_rendered, fem)) = unit_word(range_unit_tok.text()) {
-                let gender = if fem { G_F } else { G_M };
-                if !render_range(wa, t, p, off, span_len, gender) {
-                    return 0;
+        match step {
+            Step::Stop => break,
+            Step::Skip => {}
+            Step::Commit => {
+                let u = &mut s[u11];
+                if u.start == 0 {
+                    u.start = cur.start;
+                    u.ws = cur.ws;
                 }
-                if !emit_phrase(wa, &unit_rendered, range_unit_tok.start, range_unit_tok.end, b'A', b'D', SRC) {
-                    return 0;
+                u.end = p4 + l534;
+                u.len = cur.len;
+                u.class = cur.class;
+                u.tag = t524[u10];
+                u.after = p3 + l534 as usize;
+                u.text = cur.text().to_vec();
+                if buf.0[0] != 0 {
+                    u.render = buf.get().to_vec();
+                    buf.0[0] = 0;
                 }
-                // A range's trailing unit word is always marked plural
-                // (`FUN_10033050`'s own simple-range branch writes its
-                // `local_4c0[6]` plural marker unconditionally -- confirmed
-                // via decompile -- which flows into the unit word's own
-                // dword-8 plural-flag write in `FUN_10031720`).
-                let n = wa.i16(0) as usize;
-                if n > 0 {
-                    wa.set_i16(WaSpa::rec(n - 1) + 0x12, 1);
-                }
-                return span_len + r1;
+                u7 = l540 + l534;
+                l540 = u7;
+                p4 += l534;
+                p3 += l534 as usize;
+                u11 += 1;
             }
         }
+        u10 += 1;
     }
 
-    let p1 = p + tok.consumed as usize;
-    let off1 = off + tok.consumed;
-    let (unit_tok, r1) = tokenize(t, p1, off1, 0xb);
-    if unit_tok.class != 1 {
-        return -1;
-    }
-    let Some((unit_rendered, fem)) = unit_word(unit_tok.text()) else {
-        return -1;
+    let mode = match t53c[0] {
+        b'$' => 1,
+        b'A' => 2,
+        _ => return -1,
     };
-
-    // Masculine units force the numeral's own apocope form ("veintiun",
-    // not "veintiuno") the same way a following masculine noun would
-    // (`G_M`), matching a fresh capture ("21 nudos" -> "veintiun"); `G_F`
-    // for a feminine unit ("21 millas" -> "veintiuna") is unconditional.
-    let gender = if fem { G_F } else { G_M };
-    let mut num_word = Vec::new();
-    cardinal_to_words(&mut num_word, &num_text, gender);
-
-    // `FUN_100321c0`'s own plural-flag write happens inside its per-token
-    // commit loop, right after committing *that* token's own record --
-    // confirmed against captures: both the number's own record and the
-    // unit word's own record get the flag when the count isn't 1.
-    let mark_plural = |wa: &mut WaSpa| {
-        if plural(&num_text) {
-            let n = wa.i16(0) as usize;
-            if n > 0 {
-                wa.set_i16(WaSpa::rec(n - 1) + 0x12, 1);
+    let mut ctx = false;
+    let mut n = u11;
+    while n >= 1 {
+        let range = match (mode, n) {
+            (1, 3) => Some(0..1),
+            (2, 1) => Some(1..2),
+            (2, 2) => Some(2..3),
+            (2, 3) => Some(3..5),
+            (2, 5) => Some(5..6),
+            _ => None,
+        };
+        if let Some(range) = range {
+            if let Some(k) = range.into_iter().find(|&k| PATTERNS[k] == &t53c[..n]) {
+                let consumed = s[n - 1].end - off;
+                if k == 1 {
+                    if pre.len > 0 && s[0].tag == b'C' && context(&s[0].text, t, p, off, consumed) {
+                        ctx = true;
+                    }
+                } else if k == 3 {
+                    if s[0].tag == b'C' && context(&s[0].text, t, p, off, consumed) {
+                        ctx = true;
+                    }
+                    if s[2].tag == b'C' && context(&s[2].text, t, p, off, consumed) {
+                        ctx = true;
+                    }
+                }
+                if validate(&mut s, &pre, k, ctx, buf.residue(), t) {
+                    return if commit(wa, &s, n, &pre, t) { consumed } else { 0 };
+                }
             }
         }
-    };
-    if !emit_phrase(wa, &num_word, tok.start, tok.end, b'D', b'D', SRC) {
-        return 0;
+        n -= 1;
     }
-    mark_plural(wa);
-    if !emit_phrase(wa, &unit_rendered, unit_tok.start, unit_tok.end, b'A', b'D', SRC) {
-        return 0;
-    }
-    mark_plural(wa);
-    tok.consumed + r1
+    -1
 }

@@ -432,6 +432,26 @@ pub fn year(buf: &mut [u8], src: &[u8]) {
         append_raw(buf, &t);
         return;
     }
+    if v >= 10000 && era().is_2009() {
+        // paul09 FUN_10036d10 / julie09 FUN_10036ec0: five or more digits are read in pairs
+        let d = fmt_d(v);
+        let mut at = 0;
+        if d.len() % 2 != 0 {
+            number(buf, &d[..1], 1);
+            at = 1;
+        }
+        while at < d.len() {
+            let mut t = new_buf();
+            number(&mut t, &d[at..at + 2], 1);
+            if at == 0 {
+                strcpy(buf, &t);
+            } else {
+                append_raw(buf, &t);
+            }
+            at += 2;
+        }
+        return;
+    }
     if v < 100 || v >= 10000 {
         number(buf, &fmt_d(v), 1);
         return;
@@ -530,6 +550,19 @@ pub fn split_decimal(w: &[u8]) -> (Vec<u8>, Vec<u8>) {
 /// `FUN_10062040`: the number is not exactly 1 (plural units: "feet", "inches").
 pub fn plural(w: &[u8]) -> bool {
     let w = cs(w);
+    if era() == crate::era::Era::Paul09 {
+        // paul09 FUN_1005bb90: plural only above one ("0 miles" stays singular), up to 30 characters.
+        if w.is_empty() || !numeric(w) || w.len() >= 0x1f {
+            return false;
+        }
+        if !w.contains(&b'.') {
+            let v = atoi(&digits_only(w)) as u32;
+            return v != 1 && v != 0;
+        }
+        let (ip, fp) = split_decimal(w);
+        let (a, b) = (atoi(&ip) as u32, atoi(&fp) as u32);
+        return if a == 1 { b != 0 } else { 1 < a };
+    }
     if w.is_empty() || !numeric(w) || w.len() >= 0x1e {
         return false;
     }
@@ -644,6 +677,8 @@ fn pair(buf: &mut [u8], src: &[u8]) {
     if src.len() == 1 {
         match src[0] {
             b'1'..=b'9' => strcpy(&mut w, unit_word((src[0] - b'0') as i32)),
+            // julie09 FUN_1005e2d0: a lone '0' reads "oh".
+            b'0' if era().is_2009() => strcpy(&mut w, s(0x1009c740)),
             _ => w[0] = 0,
         }
     } else if src.len() == 2 {
@@ -794,7 +829,8 @@ pub fn code(buf: &mut [u8], src: &[u8]) {
     if src.is_empty() {
         return;
     }
-    if src[0] != b'0' && super::sbd::all_digit(src) {
+    // julie09 FUN_1005e9c0 has no leading-zero test.
+    if (src[0] != b'0' || era().is_2009()) && super::sbd::all_digit(src) {
         pairs(buf, src);
         return;
     }

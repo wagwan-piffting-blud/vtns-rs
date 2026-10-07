@@ -43,7 +43,7 @@ pub fn numexpr(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32
         plus(fe, t, p, off, r)
     } else if op(b'*') {
         (times(fe, wa, tok, t, p, off, r), r)
-    } else if ((strcmp(&tok.text, s(0x100803b0)) == 0 && tok.len == 2) || (lower(tok.text[0]) == 0x78 && tok.len == 1)) && tok.class == 3 && (0..3).contains(&tok.ws) {
+    } else if ((strcmp(&tok.text, s(0x100803b0)) == 0 && tok.len == 2) || (lower(tok.text[0]) == 0x78 && tok.len == 1)) && tok.class == 3 && (0..3).contains(&tok.ws) && !fe.era.is_2009() {
         match times_sign(fe, wa, tok, t, p, off, r) {
             Some(w) => (w, r),
             None => return -1,
@@ -100,7 +100,8 @@ fn times(fe: &Fe, wa: &Wa, tok: &Tok, t: &[u8], p: usize, off: i32, r: i32) -> V
         }
         return Vec::new();
     }
-    if !(after_units(wa, &b) && tok.ws < 2) {
+    // julie09 FUN_1003f080 also needs the unit reading to end `ws` bytes before this token.
+    if !(after_units(wa, &b) && tok.ws < 2) || (fe.era.is_2009() && off - b.end != tok.ws) {
         return Vec::new();
     }
     let (x1, r1) = tk(fe, t, p + r as usize, off + r, 0);
@@ -251,7 +252,7 @@ fn dash_word(fe: &Fe, wa: &mut Wa, tok: &Tok, t: &[u8], p: usize, off: i32, r: i
             wa.set_ri32(n - 1, 0x2c, 1);
             return None;
         }
-        if last_is_b && b.class == 1 && b.len == 1 && upper(b.text[0]) == 0x4b && (0..=2).contains(&tok.ws) && nx.class == 2 && tok.ws == nx.ws {
+        if era() != crate::era::Era::Paul09 && last_is_b && b.class == 1 && b.len == 1 && upper(b.text[0]) == 0x4b && (0..=2).contains(&tok.ws) && nx.class == 2 && tok.ws == nx.ws {
             let (n2, _) = tk(fe, t, p2, o2, 0);
             if n2.len > 0 && n2.ws < 3 && stricmp(&n2.text, s(0x100806d4)) == 0 {
                 return Some(s(0x1007740c));
@@ -296,7 +297,8 @@ fn number_dash(fe: &Fe, wa: &mut Wa, tok: &Tok, a: &Tok, b: &Tok, nx: &Tok, t: &
     let c2 = n2.text[0];
     if n2.len == 1 && c2 != 0 {
         if strchr(s(0x100804e4), c2) && tok.ws == nx.ws && tok.ws == n2.ws && n2.ws < 2 {
-            return if c2 != b'-' || tok.ws != 0 { Some(minus) } else { None };
+            // paul09 FUN_1003eaa0 has no exception for a glued "-".
+            return if c2 != b'-' || tok.ws != 0 || era() == crate::era::Era::Paul09 { Some(minus) } else { None };
         }
         if strchr(s(0x1007d4e8), c2) && tok.ws == nx.ws && n2.ws < 2 {
             let (n3, _) = tk(fe, t, p2 + r2 as usize, o2 + r2, 0);
@@ -326,7 +328,7 @@ fn number_dash(fe: &Fe, wa: &mut Wa, tok: &Tok, a: &Tok, b: &Tok, nx: &Tok, t: &
             return None;
         }
         if !(n2.len != 0 && (n2.len < 1 || n2.class == 2)) {
-            return if a.text[0] != b'-' || tok.ws != 0 { Some(minus) } else { None };
+            return if a.text[0] != b'-' || tok.ws != 0 || era() == crate::era::Era::Paul09 { Some(minus) } else { None };
         }
     }
     if tok.ws > 1 || nx.ws > 1 || tok.ws != nx.ws {

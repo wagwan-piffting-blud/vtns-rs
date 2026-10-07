@@ -9,6 +9,8 @@ use std::path::Path;
 #[path = "prosody_tables.rs"]
 pub mod tables;
 
+use crate::era::Era;
+use crate::tree2;
 use crate::tree3::Tree;
 use tables::*;
 
@@ -63,6 +65,8 @@ pub struct Word {
 /// One sentence: words plus phrase grouping (words per phrase, SS+0x0e+16g).
 #[derive(Debug, Clone, Default)]
 pub struct Sentence {
+    /// Selects the 2009 variants of the break sets below.
+    pub era: Era,
     pub words: Vec<Word>,
     pub phrase_words: Vec<usize>,
 }
@@ -115,6 +119,34 @@ impl Trees {
     }
 }
 
+impl Trees {
+    /// paul09: `tree_dir` is `.../M16/ttsdata/tree`; the `*f` pitch trees are vector trees.
+    pub fn load_tree2(tree_dir: &Path) -> io::Result<Trees> {
+        let d = |n: &str| tree2::load(&tree_dir.join("duration").join(format!("{}.tree2", n)), false);
+        let pt = |n: &str| tree2::load(&tree_dir.join("pitch").join(format!("{}.tree2", n)), false);
+        let pf = |n: &str| tree2::load(&tree_dir.join("pitch").join(format!("{}.tree2", n)), true);
+        Ok(Trees {
+            vshort: d("vshort")?,
+            vlong: d("vlong")?,
+            vdi: d("vdi")?,
+            vsch: d("vsch")?,
+            cstop: d("cstop")?,
+            cfri: d("cfri")?,
+            caff: d("caff")?,
+            cnas: d("cnas")?,
+            capp: d("capp")?,
+            nbt: pt("nbt")?,
+            nbf: pf("nbf")?,
+            bt: pt("bt")?,
+            bf: pf("bf")?,
+            qbt: pt("qbt")?,
+            qbf: pf("qbf")?,
+            sbt: pt("sbt")?,
+            sbf: pf("sbf")?,
+        })
+    }
+}
+
 /// Base phone index of a phone code (`(char)DAT_1007b6c0[(char)code]`).
 pub fn phone_index(code: u8) -> i8 {
     PHONE_INDEX[(code & 0x7f) as usize]
@@ -129,8 +161,9 @@ pub fn phone_props(code: u8) -> [u8; 8] {
     }
 }
 
-fn is_final_break(b: u8) -> bool {
-    matches!(b, BRK_PHRASE | BRK_SENTENCE | BRK_QUESTION | BRK_GRAVE)
+/// The 2009 builds (julie09 `FUN_10013010`/`FUN_10013450`) leave out BRK_GRAVE.
+fn is_final_break(era: Era, b: u8) -> bool {
+    matches!(b, BRK_PHRASE | BRK_SENTENCE | BRK_QUESTION) || (b == BRK_GRAVE && era == Era::V2014)
 }
 
 /// Previous word ended in a phrase break, or this is the sentence's first word.
@@ -153,7 +186,7 @@ pub fn duration_features(s: &Sentence, wi: usize, si: usize, p: usize) -> [i16; 
         phone_index(w.codes[k - 1]) as u8 as i16
     };
     fv[2] = if last_in_word {
-        if is_final_break(w.brk) { EDGE_PAUSE } else { EDGE_JUNCTURE }
+        if is_final_break(s.era, w.brk) { EDGE_PAUSE } else { EDGE_JUNCTURE }
     } else {
         phone_index(w.codes[k + 1]) as u8 as i16
     };
@@ -162,7 +195,7 @@ pub fn duration_features(s: &Sentence, wi: usize, si: usize, p: usize) -> [i16; 
     fv[5] = syl.b2 as i16;
     fv[6] = if si == 0 && starts_after_pause(s, wi) {
         1
-    } else if si + 1 == nsyl && is_final_break(w.brk) {
+    } else if si + 1 == nsyl && is_final_break(s.era, w.brk) {
         3
     } else {
         2
@@ -249,7 +282,7 @@ pub fn pitch_features(s: &Sentence, wi: usize, si: usize) -> [i16; 12] {
     }
     fv[8] = if si == 0 && starts_after_pause(s, wi) {
         1
-    } else if is_final_break(w.brk) && si + 1 == nsyl {
+    } else if is_final_break(s.era, w.brk) && si + 1 == nsyl {
         3
     } else {
         2
@@ -364,11 +397,20 @@ pub struct TargetRef {
 /// quantized duration, and the syllable's smoothed F0 sampled at the voiced
 /// start and end of this target (low byte of the Hz value).
 pub fn target_feature(word: &Word, word_targets: &[TargetRef], t: &TargetRef) -> [u8; 3] {
+    target_feature_era(Era::V2014, word, word_targets, t)
+}
+
+/// julie09 `FUN_10018a20`: the duration code uses the whole phone's duration even for half-phone targets.
+pub fn target_feature_era(era: Era, word: &Word, word_targets: &[TargetRef], t: &TargetRef) -> [u8; 3] {
     let half_dur = |phone: u8, half: u8| {
         let d = word.dur[phone as usize] as i32;
         if half != 0 { d / 2 } else { d }
     };
-    let dur_code = quantize_duration(half_dur(t.phone, t.half));
+    let dur_code = if era == Era::V2014 {
+        quantize_duration(half_dur(t.phone, t.half))
+    } else {
+        quantize_duration(word.dur[t.phone as usize] as i32)
+    };
     let first = word_targets.iter().position(|e| e.syl == t.syl);
     let (mut a, mut b) = (0i32, 0i32);
     if let Some(first) = first {
@@ -378,7 +420,8 @@ pub fn target_feature(word: &Word, word_targets: &[TargetRef], t: &TargetRef) ->
                 break;
             }
             if e.unvoiced == 0 {
-                let d = half_dur(e.phone, e.half);
+                // julie09 tests the target's own half flag (pbVar1[4]) for every list entry.
+                let d = half_dur(e.phone, if era == Era::V2014 { e.half } else { t.half });
                 if (i as i32) < t.index as i32 {
                     before += d;
                 } else if i as i32 == t.index as i32 {
@@ -450,8 +493,14 @@ pub struct SpanContext<'a> {
 /// pro_ApplyTagSpansToWords (0x10022970). Returns the trailing pause (TIB+0x122440,
 /// ms) that applies after the last word of the text, or -1.
 pub fn apply_tag_spans(ctx: &SpanContext, spans: &mut [SpanList; 8], r: &mut WordRates, trail: &mut i32) {
+    apply_tag_spans_era(Era::V2014, ctx, spans, r, trail)
+}
+
+/// julie09 `FUN_10017d10`: five stacks (kinds 0..4), no kind 7; the clamp values are the same.
+pub fn apply_tag_spans_era(era: Era, ctx: &SpanContext, spans: &mut [SpanList; 8], r: &mut WordRates, trail: &mut i32) {
     let n = ctx.words.len();
-    for k in [0usize, 1, 2, 7] {
+    let rate_kinds: &[usize] = if era == Era::V2014 { &[0, 1, 2, 7] } else { &[0, 1, 2] };
+    for &k in rate_kinds {
         let l = &spans[k];
         if l.pos.is_empty() {
             continue;
@@ -603,6 +652,18 @@ pub fn pause_samples(pause: &[i32], w: usize, prev_brk: u8, cont: &mut bool, com
         BRK_PHRASE => comma_ms.map_or(3200, |ms| ms << 4),
         _ => 0,
     }
+}
+
+/// Channel slot used by pro_PauseSamples: julie09 `FUN_1002cba0` clamps to 0..=3 and falls back to 3,
+/// paul09 `FUN_1002cdd0` falls back to 1 (2014: 0..=5, falling back to 1).
+pub fn clamp_channel(era: Era, ch: i8) -> usize {
+    let (hi, fallback) = match era {
+        Era::V2014 => (5, 1),
+        Era::Julie09 => (3, 3),
+        Era::Violeta09 => (0, 0),
+        _ => (3, 1),
+    };
+    if ch < 0 || ch > hi { fallback } else { ch as usize }
 }
 
 /// Length of a silence record for `pause_samples` at duration rate `speed` (%).

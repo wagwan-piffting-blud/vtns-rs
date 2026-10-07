@@ -11,10 +11,19 @@ pub mod classes;
 pub mod tables;
 #[path = "unitsel_tables_spa.rs"]
 pub mod tables_spa;
+#[path = "unitsel_tables_paul09.rs"]
+pub mod tables_paul09;
+#[path = "unitsel_tables_viol09.rs"]
+pub mod tables_viol09;
+#[path = "unitsel_tables_julie09.rs"]
+pub mod tables_julie09;
+#[path = "unitsel09.rs"]
+mod sel09;
 
-use self::classes::{class_key_lang, half_key_lang, half_key_len, Classes};
+use self::classes::{class_key_lang, half_key_lang, half_key_len, Classes, Tab09};
 use self::tables::{DATA, DATA_LO, LEFT_POS_LISTS, RDATA, RDATA_LO, RIGHT_POS_LISTS};
 use crate::bank::Bank;
+use crate::era::Era;
 use crate::lang::Lang;
 
 const MAX_CANDS: usize = 10000;
@@ -187,12 +196,49 @@ pub struct Word {
     /// Per syllable: phone count (`+0x1d`) and 12-point F0 in Hz (`+4`).
     pub syl_nph: Vec<u8>,
     pub syl_f0: Vec<[i16; 12]>,
+    /// 2009 builds: `+0x90 + 5k`, the 5-byte phone context label `{L1, C, R1, a, b}`.
+    pub ctx5: Vec<[u8; 5]>,
+    /// 2009 builds: `+0x2fc`, set by the phrase-break pass, read by the target and join costs.
+    pub flag: u8,
+    /// 2009 builds: `+0x2fd`, the break character.
+    pub brk: u8,
 }
 
 impl Word {
     /// Build from a raw word record and its syllable records.
     pub fn from_raw(raw: &[u8], syls: &[Vec<u8>]) -> Word {
         Self::from_raw_lang(raw, syls, Lang::Eng)
+    }
+
+    /// Build from a raw word record of the given engine build (0x300-byte records for the 2009 builds).
+    pub fn from_raw_era(raw: &[u8], syls: &[Vec<u8>], era: Era) -> Word {
+        if era == Era::V2014 {
+            return Self::from_raw_lang(raw, syls, Lang::Eng);
+        }
+        // (n_phones, dur, ctx, edge byte, flag, break, syllable n_phones) offsets: 0x300-byte records
+        // (julie09 / paul09) and Violeta's 0x47c-byte records.
+        let (n_ph_off, dur_off, ctx_off, edge_off, flag_off, syl_nph_off) = match era {
+            Era::Violeta09 => (0x465, 0x0e, 0xd6, 0x2ca, 0x478, 0x24),
+            _ => (0x2e4, 0x0a, 0x90, 0x1d5, 0x2fc, 0x1d),
+        };
+        let n_ph = raw[n_ph_off] as usize;
+        let mut w = Word { flag: raw[flag_off], brk: raw[flag_off + 1], ..Default::default() };
+        for k in 0..n_ph {
+            w.dur.push(i16::from_le_bytes([raw[dur_off + 2 * k], raw[dur_off + 1 + 2 * k]]));
+            let mut c = [0u8; 5];
+            c.copy_from_slice(&raw[ctx_off + 5 * k..ctx_off + 5 + 5 * k]);
+            w.ctx5.push(c);
+            w.edge_code.push(raw[edge_off + k]);
+        }
+        for s in syls {
+            w.syl_nph.push(s[syl_nph_off]);
+            let mut f = [0i16; 12];
+            for (i, v) in f.iter_mut().enumerate() {
+                *v = i16::from_le_bytes([s[4 + 2 * i], s[5 + 2 * i]]);
+            }
+            w.syl_f0.push(f);
+        }
+        w
     }
 
     /// `raw`/`syls` are the WORD_SIZE/SYL_SIZE-byte records the harness
@@ -309,11 +355,27 @@ pub struct Selector<'a> {
     /// f32, in its own term order, where the 32-bit x87 build rounds once per store.
     pub x64: bool,
     pub lang: Lang,
+    /// Engine build; the 2009 builds take the `sel09` path.
+    pub era: Era,
+    tab: Option<Tab09>,
+    /// 2009 class-list buffer (`TIB+0xe75fc`, count at `+0xe7aac`); persists across lookups.
+    lbuf: Vec<i32>,
+    lcount: i16,
 }
 
 impl<'a> Selector<'a> {
     pub fn new(bank: &'a Bank, cls: &'a Classes, cep: &'a CepDist, sd: &'a ScalarDist) -> Selector<'a> {
         Self::new_lang(bank, cls, cep, sd, Lang::Eng)
+    }
+
+    /// Selector for the given engine build. `cls` must come from `Classes::build_era` for 2009 builds.
+    /// The sentence type byte (`select_phrase`'s `final_type`) is 4/5/6 for declarative / question /
+    /// other in the 2009 builds, and 4 for every phrase but the last.
+    pub fn new_era(bank: &'a Bank, cls: &'a Classes, cep: &'a CepDist, sd: &'a ScalarDist, era: Era) -> Selector<'a> {
+        let mut s = Self::new_lang(bank, cls, cep, sd, Lang::Eng);
+        s.era = era;
+        s.tab = Tab09::for_era(era);
+        s
     }
 
     pub fn new_lang(bank: &'a Bank, cls: &'a Classes, cep: &'a CepDist, sd: &'a ScalarDist, lang: Lang) -> Selector<'a> {
@@ -335,6 +397,10 @@ impl<'a> Selector<'a> {
             scratch: vec![0.0; BEAM],
             x64: false,
             lang,
+            era: Era::V2014,
+            tab: None,
+            lbuf: vec![0; 0x400],
+            lcount: 0,
         }
     }
 
@@ -342,6 +408,8 @@ impl<'a> Selector<'a> {
     pub fn reset(&mut self) {
         self.pool = vec![Cand::default(); MAX_CANDS];
         self.ptrs = (0..MAX_CANDS).collect();
+        self.lbuf = vec![0; 0x400];
+        self.lcount = 0;
     }
 
     fn c(&self, i: usize) -> &Cand {
@@ -1762,6 +1830,9 @@ impl<'a> Selector<'a> {
     /// the phrase covers `words[first..first+nw]`. `final_type` is the sentence
     /// type byte for the last phrase of a sentence and 5 otherwise.
     pub fn select_phrase(&mut self, words: &mut [Word], first: usize, nw: usize, final_type: u8) -> PhraseResult {
+        if self.era != Era::V2014 {
+            return self.select_phrase09(words, first, nw, final_type);
+        }
         self.final_type = final_type;
         if self.word_first_target.len() < words.len() {
             self.word_first_target.resize(words.len(), 0);

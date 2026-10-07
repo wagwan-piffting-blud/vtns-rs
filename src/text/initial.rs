@@ -34,6 +34,7 @@
 //! Not ported: the demo nag.
 
 use super::cstr::*;
+use crate::era::Era;
 use super::tabs::{ptab, ptabn, rec5a, rec66, Ptab, Rec5a, Rec66};
 use super::tokenize::{tokenize, Tok};
 
@@ -584,6 +585,9 @@ fn sampa_ascii(text: &[u8]) -> Option<Vec<u8>> {
 /// `UW0`/`IY0`; then, if no token carries primary stress (`1`), promotes the
 /// first `0` to `1`.
 fn stress_fixup(text: &[u8]) -> Vec<u8> {
+    if era().is_2009() {
+        return stress_fixup09(text);
+    }
     let toks: Vec<&[u8]> = text.split(|&c| c == b' ').collect();
     // `FUN_100487a0` (0x10048a08-0x10048c86, disassembly-confirmed): a
     // 2-letter+digit vowel token immediately followed by a token starting
@@ -627,6 +631,111 @@ fn stress_fixup(text: &[u8]) -> Vec<u8> {
         if let Some(p) = out.iter().position(|&c| c == b'0') {
             out[p] = b'1';
         }
+    }
+    out
+}
+
+/// julie09 `FUN_10045450`: the 2009 phone-name fixup (the cursor `i` walks the text, `out` is the
+/// 512-byte work buffer; `FUN_1005de40` appends one char, `FUN_1005ddd0` a string).
+fn stress_fixup09(p: &[u8]) -> Vec<u8> {
+    let len = strlen(p) as isize;
+    let g = |k: isize| at(p, k);
+    let digit = |c: u8| matches!(c, b'0' | b'1' | b'2');
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: isize = 0;
+    'top: while i < len {
+        let tail = |k: isize| i + k == len || (i + k < len && g(i + k) == b'#');
+        if g(i) == b'W' && g(i + 1) == b' ' && tail(2) {
+            out.extend_from_slice(b"UW0 ");
+            i += 2;
+            continue;
+        }
+        if g(i) == b'Y' && g(i + 1) == b' ' && tail(2) {
+            out.extend_from_slice(b"IY0 ");
+            i += 2;
+            continue;
+        }
+        if g(i) == b'I' && g(i + 1) == b'H' && g(i + 3) == b' ' && tail(4) {
+            out.extend_from_slice(b"IY");
+            out.push(g(i + 2));
+            out.push(b' ');
+            i += 4;
+            continue;
+        }
+        if g(i) == b'U' && g(i + 1) == b'H' && g(i + 3) == b' ' && tail(4) {
+            out.extend_from_slice(b"UW");
+            out.push(g(i + 2));
+            out.push(b' ');
+            i += 4;
+            continue;
+        }
+        if i + 5 < len && g(i) == b'A' && g(i + 1) == b'H' && g(i + 3) == b' ' && g(i + 4) == b'R' && g(i + 5) == b' ' {
+            out.extend_from_slice(b"ER");
+            out.push(g(i + 2));
+            out.push(b' ');
+            i += 6;
+            continue;
+        }
+        if i + 7 < len {
+            let c = g(i);
+            let c1 = g(i + 1);
+            let er = g(i + 4) == b'E' && g(i + 5) == b'R' && g(i + 7) == b' ';
+            let pair = g(i + 3) == b' ' && ((c == b'A' && matches!(c1, b'A' | b'E' | b'O')) || (matches!(c, b'E' | b'I' | b'U') && c1 == b'H'));
+            if er && pair {
+                for k in 0..4 {
+                    out.push(g(i + k));
+                }
+                out.extend_from_slice(b"R ");
+                i += 8;
+                continue;
+            }
+            if digit(g(i + 6)) && c == b'I' && c1 == b'H' && g(i + 3) == b' ' {
+                out.extend_from_slice(b"IY");
+                out.push(g(i + 2));
+                out.push(b' ');
+                i += 4;
+                continue;
+            }
+            if digit(g(i + 6)) && c == b'U' && c1 == b'H' && g(i + 3) == b' ' {
+                out.extend_from_slice(b"UW");
+                out.push(g(i + 2));
+                out.push(b' ');
+                i += 4;
+                continue;
+            }
+        }
+        let c = g(i);
+        let copy_tok = i < 2
+            || !matches!(c, b'L' | b'M' | b'N')
+            || g(i + 1) != b' '
+            || g(i - 1) != b' '
+            || digit(g(i - 2))
+            || (3 < i && matches!(c, b'R' | b'L') && g(i - 3) == b' ' && digit(g(i - 4)))
+            || (i + 2..len).any(|j| digit(g(j)));
+        if copy_tok {
+            while i < len && g(i) != b' ' {
+                out.push(g(i));
+                i += 1;
+            }
+            if i >= len {
+                break 'top;
+            }
+            out.push(b' ');
+            i += 1;
+        } else {
+            out.extend_from_slice(b"AH0 ");
+            out.push(c);
+            out.push(b' ');
+            i += 2;
+        }
+    }
+    if !out.contains(&b'1') {
+        if let Some(k) = out.iter().position(|&c| c == b'0') {
+            out[k] = b'1';
+        }
+    }
+    if out.last() == Some(&b' ') {
+        out.pop();
     }
     out
 }
@@ -784,7 +893,198 @@ fn push_phone(out: &mut Vec<u8>, phones: &mut i32, name: &[u8]) -> bool {
     true
 }
 
+/// julie09 `FUN_10044ac0`: the 2009 x-ntsampa scanner (a three-state machine: 0 start/after a
+/// separator, 1 after a vowel, 2 after a consonant; `iv` is the engine's running length counter,
+/// one more per name than the text, and the dZ/tS names count 6). Returns `(consumed, names)`.
+fn sampa_group09(text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    const VOWELS: &[u8] = b"AaIiUuEeOoV{@";
+    const CONS: &[u8] = b"pbtdkgfvTDszSZhmnNlrwj";
+    let mut out: Vec<u8> = Vec::new();
+    let put = |out: &mut Vec<u8>, name: &[u8]| {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(name);
+    };
+    let (mut iv, mut count, mut state, mut stress) = (0usize, 0i32, 0, 0u8);
+    let mut cp = 0isize;
+    let mut chk: Option<(usize, usize)> = None;
+    loop {
+        let c = at(text, cp);
+        if c == 0 {
+            return Some((cp as usize, out));
+        }
+        if state != 2 {
+            if c == b'\'' {
+                cp += 1;
+                stress = 1;
+            } else if c == b'%' {
+                cp += 1;
+                stress = 2;
+            } else if c == b'*' {
+                stress = 2;
+                cp += 1;
+                continue;
+            } else {
+                stress = 0;
+            }
+        }
+        let c = at(text, cp);
+        let (n1, n2) = (at(text, cp + 1), at(text, cp + 2));
+        let st = |a: &'static str, b: &'static str, d: &'static str| -> Vec<u8> {
+            match stress {
+                1 => a.as_bytes().to_vec(),
+                2 => b.as_bytes().to_vec(),
+                _ => d.as_bytes().to_vec(),
+            }
+        };
+        let mut next_iv = iv;
+        if c != 0 && VOWELS.contains(&c) {
+            let (name, add): (Vec<u8>, usize) = if c == b'A' {
+                if n1 == b':' {
+                    cp += 1;
+                }
+                (st("AA1", "AA2", "AA0"), 4)
+            } else if c == b'{' {
+                (st("AE1", "AE2", "AE0"), 4)
+            } else if c == b'V' || (c == b'@' && n1 != b'r') {
+                (st("AH1", "AH2", "AH0"), 4)
+            } else if c == b'O' && n1 != b'I' {
+                if n1 == b':' {
+                    cp += 1;
+                }
+                (st("AO1", "AO2", "AO0"), 4)
+            } else if c == b'E' {
+                (st("EH1", "EH2", "EH0"), 4)
+            } else if c == b'@' && n1 == b'r' {
+                cp += 1;
+                (st("ER1", "ER2", "ER0"), 4)
+            } else if c == b'I' {
+                (st("IH1", "IH2", "IH0"), 4)
+            } else if c == b'i' && n1 != b'r' {
+                if n1 == b':' {
+                    cp += 1;
+                }
+                (st("IY1", "IY2", "IY0"), 4)
+            } else if c == b'U' {
+                (st("UH1", "UH2", "UH0"), 4)
+            } else if c == b'u' && n1 != b'r' {
+                if n1 == b':' {
+                    cp += 1;
+                }
+                (st("UW1", "UW2", "UW0"), 4)
+            } else if c == b'a' && n1 == b'U' && n2 != b'r' {
+                cp += 1;
+                (st("AW1", "AW2", "AW0"), 4)
+            } else if c == b'a' && n1 == b'I' && n2 != b'r' {
+                cp += 1;
+                (st("AY1", "AY2", "AY0"), 4)
+            } else if c == b'e' && n1 != b'r' {
+                if n1 == b'I' {
+                    cp += 1;
+                }
+                (st("EY1", "EY2", "EY0"), 4)
+            } else if c == b'o' {
+                if n1 == b'U' {
+                    cp += 1;
+                }
+                (st("OW1", "OW2", "OW0"), 4)
+            } else if c == b'O' && n1 == b'I' && n2 != b'r' {
+                cp += 1;
+                (st("OY1", "OY2", "OY0"), 4)
+            } else if c == b'i' && n1 == b'r' {
+                cp += 1;
+                (st("IH1 R", "IH2 R", "IH0 R"), 6)
+            } else if c == b'e' && n1 == b'r' {
+                cp += 1;
+                (st("EH1 R", "EH2 R", "EH0 R"), 6)
+            } else if c == b'u' && n1 == b'r' {
+                cp += 1;
+                (st("UH1 R", "UH2 R", "UH0 R"), 6)
+            } else if c == b'a' && n1 == b'U' && n2 == b'r' {
+                cp += 2;
+                (st("AW1 ER0", "AW2 ER0", "AW0 ER0"), 8)
+            } else if c == b'a' && n1 == b'I' && n2 == b'r' {
+                cp += 2;
+                (st("AY1 ER0", "AY2 ER0", "AY0 ER0"), 8)
+            } else if c == b'O' && n1 == b'I' && n2 == b'r' {
+                cp += 2;
+                (st("OY1 ER0", "OY2 ER0", "OY0 ER0"), 8)
+            } else {
+                return None;
+            };
+            put(&mut out, &name);
+            next_iv = iv + add;
+            count += if add > 4 { 2 } else { 1 };
+            stress = 0;
+            state = 1;
+        } else if c != 0 && CONS.contains(&c) {
+            let (name, add): (&[u8], usize) = if c == b'd' && n1 == b'Z' {
+                cp += 1;
+                (b"JH", 6)
+            } else if c == b't' && n1 == b'S' {
+                cp += 1;
+                (b"CH", 6)
+            } else {
+                match c {
+                    b'D' => (b"DH", 3),
+                    b'h' => (b"HH", 3),
+                    b'N' => (b"NG", 3),
+                    b'S' => (b"SH", 3),
+                    b'T' => (b"TH", 3),
+                    b'Z' => (b"ZH", 3),
+                    b'b' => (b"B", 2),
+                    b'd' => (b"D", 2),
+                    b'f' => (b"F", 2),
+                    b'g' => (b"G", 2),
+                    b'k' => (b"K", 2),
+                    b'l' => (b"L", 2),
+                    b'm' => (b"M", 2),
+                    b'n' => (b"N", 2),
+                    b'p' => (b"P", 2),
+                    b'r' => (b"R", 2),
+                    b's' => (b"S", 2),
+                    b't' => (b"T", 2),
+                    b'v' => (b"V", 2),
+                    b'w' => (b"W", 2),
+                    b'j' => (b"Y", 2),
+                    _ => (b"Z", 2),
+                }
+            };
+            put(&mut out, name);
+            next_iv = iv + add;
+            count += 1;
+            state = 2;
+        } else {
+            if c == b'#' || c == b' ' {
+                if iv > 0 && n1 != c && n1 != 0 {
+                    put(&mut out, b"#");
+                    chk = Some((cp as usize, iv));
+                    count += 1;
+                    next_iv = iv + 2;
+                }
+            } else if c != b'.' && c != b'|' {
+                return None;
+            }
+            state = 0;
+        }
+        if next_iv > 0x1ff {
+            return None;
+        }
+        iv = next_iv;
+        if count > 0x40 {
+            let (pos, at8) = chk?;
+            out.truncate(at8);
+            return Some((pos, out));
+        }
+        cp += 1;
+    }
+}
+
 fn sampa_group(text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    if era().is_2009() {
+        return sampa_group09(text);
+    }
     let mut out = Vec::new();
     let mut phones = 0i32;
     let mut stress = 0u8;
@@ -1636,6 +1936,8 @@ fn ssml_cardinal(content: &[u8], format: &[u8], detail: &[u8], pausetime: &[u8])
     let mut out: Vec<u8> = Vec::new();
     let (mut sign_seen, mut ndigits) = (false, 0i32);
     let n = c.len();
+    // julie09 `FUN_10047270`: the decimal char becomes a `"` pause and restarts the number.
+    let mut lastq = 0usize;
     for i in 0..n {
         let ch = c[i];
         if group == Some(ch) {
@@ -1648,7 +1950,11 @@ fn ssml_cardinal(content: &[u8], format: &[u8], detail: &[u8], pausetime: &[u8])
             if !(i + 1 < n && c[i + 1].is_ascii_digit()) {
                 return None;
             }
-            if out.contains(&b'.') {
+            if era().is_2009() {
+                if out.len() <= lastq || out[lastq..].contains(&b'.') {
+                    return None;
+                }
+            } else if out.contains(&b'.') {
                 return None;
             }
             out.push(b'.');
@@ -1656,7 +1962,13 @@ fn ssml_cardinal(content: &[u8], format: &[u8], detail: &[u8], pausetime: &[u8])
             if ndigits == 0 {
                 return None;
             }
-            // dropped: its digits glue onto the preceding ones
+            if era().is_2009() {
+                out.push(b'"');
+                lastq = out.len();
+                sign_seen = false;
+                ndigits = 0;
+            }
+            // 2014: dropped, its digits glue onto the preceding ones
         } else if ch.is_ascii_digit() {
             out.push(ch);
             ndigits += 1;
@@ -2679,7 +2991,7 @@ fn sayas_conv(content: &[u8], interp: &[u8], format: &[u8], detail: &[u8], pause
         numeric_pass(content, format, detail, pausetime, b'F', false)
     } else if stricmp(interp, b"ssml:cardinal") == 0 {
         ssml_cardinal(content, format, detail, pausetime)
-    } else if stricmp(interp, b"vtml:duration") == 0 {
+    } else if stricmp(interp, b"vtml:duration") == 0 && !era().is_2009() {
         vtml_duration(content, format, pausetime)
     } else if stricmp(interp, b"sapi:date") == 0 {
         sapi_date(content, format, detail, pausetime)
@@ -2714,6 +3026,7 @@ fn sayas_conv(content: &[u8], interp: &[u8], format: &[u8], detail: &[u8], pause
 
 /// Fullwidth-map record: `u16` key, string pointers at `+4`/`+8`, selector
 /// byte at `+0xc` (never set in the live table). Generated via `fwtab(...)`.
+#[derive(Clone, Copy)]
 struct FwTab {
     va: u32,
     n: i32,
@@ -2760,6 +3073,8 @@ impl FwTab {
 /// maps to the lead in `map_b` and the trail in `map_c`. The decompile's
 /// past-the-old-map arms are dead: the old map is identity in the first pass.
 fn map_fullwidth(src: &[u8]) -> (Vec<u8>, Vec<i32>, Vec<i32>) {
+    // julie09 FUN_1001eaa0 (0x100787c0), paul09 FUN_1001ed10 (0x10076790): 0x48 records (no fullwidth underscore).
+    let tab = if era().is_2009() { FwTab { va: FW_TAB.va, n: 0x48 } } else { FW_TAB };
     let n = src.len();
     let mut out = Vec::with_capacity(n);
     let (mut b, mut c) = (Vec::with_capacity(n), Vec::with_capacity(n));
@@ -2769,7 +3084,7 @@ fn map_fullwidth(src: &[u8]) -> (Vec<u8>, Vec<i32>, Vec<i32>) {
         let c1 = at(src, i as isize + 1);
         if has_n(src, i as isize, 2) && dbcs_pair(c0, c1) {
             let m = (i as i32, i as i32 + 1);
-            match FW_TAB.lookup(c0, c1) {
+            match tab.lookup(c0, c1) {
                 Some(v) => {
                     for &x in v {
                         out.push(x);
@@ -2853,6 +3168,39 @@ const TAGS: [(&[u8], &[u8], H, &[u8]); 31] = [
     (b"<vtml_break", b"/>", H::Break(3), b" \x0c\n\r\t\x0b=\""),
     (b"<vtml_emotion", b">", H::Level(7, 0x17), b" \x0c\n\r\t\x0b=\""),
     (b"</vtml_emotion", b">", H::Level(7, 0x17), WS),
+    (b"<vtml_mark", b"/>", H::Mark, b" \x0c\n\r\t\x0b=\""),
+    (b"<vtml_partofsp", b">", H::PartOfSp, b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_partofsp", b">", H::PartOfSp, WS),
+    (b"<vtml_pause", b"/>", H::Pause(6), b" \x0c\n\r\t\x0b=\""),
+    (b"<vtml_phoneme", b">", H::Phoneme, b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_phoneme", b">", H::Phoneme, WS),
+    (b"<vtml_pitch", b">", H::Level(0, 0xc), b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_pitch", b">", H::Level(0, 0xc), WS),
+    (b"<vtml_sayas", b">", H::SayAs, b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_sayas", b">", H::SayAs, WS),
+    (b"<vtml_skip", b">", H::Skip, b""),
+    (b"</vtml_skip", b">", H::Skip, b""),
+    (b"<vtml_speed", b">", H::Level(1, 0xc), b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_speed", b">", H::Level(1, 0xc), WS),
+    (b"<vtml_sub", b">", H::Sub(0x11), b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_sub", b">", H::Sub(0x11), WS),
+    (b"<vtml_volume", b">", H::Level(2, 0xc), b" \x0c\n\r\t\x0b=\""),
+    (b"</vtml_volume", b">", H::Level(2, 0xc), WS),
+    (b"<vt_pitch", b">", H::Level(0, 0x13), b" \x0c\n\r\t\x0b="),
+    (b"</vt_pitch", b">", H::Level(0, 0x13), WS),
+    (b"<vt_speed", b">", H::Level(1, 0x13), b" \x0c\n\r\t\x0b="),
+    (b"</vt_speed", b">", H::Level(1, 0x13), WS),
+    (b"<vt_volume", b">", H::Level(2, 0x13), b" \x0c\n\r\t\x0b="),
+    (b"</vt_volume", b">", H::Level(2, 0x13), WS),
+    (b"<vt_pause", b">", H::Pause(0x13), b" \x0c\n\r\t\x0b="),
+    (b"<vt_break", b">", H::Break(0x14), b" \x0c\n\r\t\x0b="),
+    (b"<say-as", b">", H::Sub(0x15), b" \x0c\n\r\t\x0b=\""),
+    (b"</say-as", b">", H::Sub(0x15), WS),
+];
+
+/// julie09/paul09 `0x1007a4e8`: 29 entries, no emotion tag.
+const TAGS09: [(&[u8], &[u8], H, &[u8]); 29] = [
+    (b"<vtml_break", b"/>", H::Break(3), b" \x0c\n\r\t\x0b=\""),
     (b"<vtml_mark", b"/>", H::Mark, b" \x0c\n\r\t\x0b=\""),
     (b"<vtml_partofsp", b">", H::PartOfSp, b" \x0c\n\r\t\x0b=\""),
     (b"</vtml_partofsp", b">", H::PartOfSp, WS),
@@ -3017,10 +3365,147 @@ impl St<'_> {
         total + clen
     }
 
-    fn handle(&mut self, pos: usize, e: &(&[u8], &[u8], H, &[u8])) -> Option<usize> {
+    /// 2009 content tag (julie09 `FUN_1002d6b0`/`FUN_1002deb0`/`FUN_1002e840`/`FUN_1002f050`): the open
+    /// marker, the converted text and the close marker are all written here; the matching close tag
+    /// later consumes itself without output. `keep` is the open flag the handler leaves behind.
+    fn content_tag09(&mut self, pos: usize, total: usize, clen: usize, conv: &[u8], flag: usize, keep: bool) -> usize {
+        let m = self.span(pos, total);
+        self.put(b"\xa2\xfe", m);
+        let from = pos + total;
+        let mc = if clen == 0 {
+            let b = self.span(from, 1).0;
+            let c = if from > 0 { self.span(from - 1, 1).1 } else { b };
+            (b, c)
+        } else {
+            self.span(from, clen)
+        };
+        self.put(conv, mc);
+        self.put(b"\xa2\xfe", m);
+        self.open[flag] = keep;
+        total + clen
+    }
+
+    /// 2009 close tag of a content handler: consumed silently while its open flag is set.
+    fn close09(&mut self, pos: usize, total: usize, flag: usize) -> Option<usize> {
+        if strnicmp(self.rest(pos), b"</", 2) != 0 || !self.open[flag] {
+            return None;
+        }
+        self.open[flag] = false;
+        Some(total)
+    }
+
+    fn handle09(&mut self, pos: usize, e: &(&[u8], &[u8], H, &[u8])) -> Option<usize> {
         let (tag, term, h, delims) = *e;
-        let (mut body, total) = self.body(pos, tag, term)?;
+        let (body, total) = self.body(pos, tag, term)?;
         let empty = re(0, &body);
+        match h {
+            H::PartOfSp => {
+                if empty {
+                    return self.close09(pos, total, POS);
+                }
+                if !re(5, &body) {
+                    return None;
+                }
+                let clen = self.content(pos + total, b"</vtml_partofsp", b"</VTML_PARTOFSP")?;
+                let part = attr(&body, b"part", delims)?;
+                let word = self.src[pos + total..pos + total + clen.min(0x1ff)].to_vec();
+                let conv = partofsp_conv(&part, &word).unwrap_or_else(|| word.clone());
+                Some(self.content_tag09(pos, total, clen, &conv, POS, true))
+            }
+            H::Phoneme => {
+                if empty {
+                    return self.close09(pos, total, PHON);
+                }
+                if !re(7, &body) {
+                    return None;
+                }
+                let self_closing = cs(&body).last() == Some(&b'/');
+                let clen = if self_closing { 0 } else { self.content(pos + total, b"</vtml_phoneme", b"</VTML_PHONEME")? };
+                let ph = attr(&body, b"ph", delims).unwrap_or_default();
+                let alpha = if re(8, &body) { attr(&body, b"alphabet", delims).unwrap_or_default() } else { Vec::new() };
+                let word = self.src[pos + total..pos + total + clen.min(0x1ff)].to_vec();
+                let conv = if stricmp(&alpha, b"x-cmu") == 0 {
+                    cmu(&ph, &word)
+                } else if stricmp(&alpha, b"x-sapi") == 0 {
+                    sapi(&ph, &word)
+                } else if stricmp(&alpha, b"ipa") == 0 || alpha.is_empty() {
+                    ipa_conv(&ph, &word)
+                } else if stricmp(&alpha, b"x-worldbet") == 0 || stricmp(&alpha, b"x-sampa") == 0 {
+                    worldbet_conv(&ph, &word)
+                } else if stricmp(&alpha, b"x-ntsampa") == 0 {
+                    ntsampa_conv(&ph, &word)
+                } else {
+                    None
+                };
+                let conv = conv.unwrap_or_else(|| word.clone());
+                Some(self.content_tag09(pos, total, clen, &conv, PHON, !(word.is_empty() && self_closing)))
+            }
+            H::SayAs => {
+                if empty {
+                    return self.close09(pos, total, SAYAS);
+                }
+                if !re(0xd, &body) {
+                    return None;
+                }
+                let clen = self.content(pos + total, b"</vtml_sayas", b"</VTML_SAYAS")?;
+                let get = |rx: usize, name: &[u8]| if rx == 0 || re(rx, &body) { attr(&body, name, delims).unwrap_or_default() } else { Vec::new() };
+                let interp = get(0, b"interpret-as");
+                let format = get(0xe, b"format");
+                let detail = get(0xf, b"detail");
+                let mut pt = get(0x10, b"pausetime");
+                if !pt.is_empty() {
+                    pt = format!("{}", atoi(&pt).max(rd_i32(0x1007ec10)).min(rd_i32(0x1007ebfc))).into_bytes();
+                }
+                let word = self.src[pos + total..pos + total + clen.min(0x1ff)].to_vec();
+                let conv = sayas_conv(&word, &interp, &format, &detail, &pt).unwrap_or_else(|| word.clone());
+                Some(self.content_tag09(pos, total, clen, &conv, SAYAS, true))
+            }
+            H::Skip => {
+                if !empty {
+                    return None;
+                }
+                if strnicmp(self.rest(pos), b"</", 2) == 0 {
+                    return self.close09(pos, total, SKIP);
+                }
+                let clen = self.content(pos + total, b"</vtml_skip", b"</VTML_SKIP")?;
+                let m = self.span(pos, total);
+                self.put(b"\xa2\xfe", m);
+                self.open[SKIP] = true;
+                Some(total + clen)
+            }
+            H::Sub(rx) => {
+                if empty {
+                    return self.close09(pos, total, SUB);
+                }
+                if !re(rx, &body) {
+                    return None;
+                }
+                let clen = if rx == 0x11 {
+                    self.content(pos + total, b"</vtml_sub", b"</VTML_SUB")?
+                } else {
+                    self.content(pos + total, b"</say-as", b"</say-as")?
+                };
+                let alias = attr(&body, if rx == 0x11 { b"alias".as_slice() } else { b"sub" }, delims).unwrap_or_default();
+                let posv = if rx == 0x11 && re(0x12, &body) { attr(&body, b"pos", delims).unwrap_or_default() } else { Vec::new() };
+                let word = self.src[pos + total..pos + total + clen.min(0x1ff)].to_vec();
+                let conv = if posv.is_empty() && !alias.is_empty() { tagged(b'S', &trim(&alias)) } else { word };
+                Some(self.content_tag09(pos, total, clen, &conv, SUB, true))
+            }
+            _ => self.handle14(pos, e, body, total, empty),
+        }
+    }
+
+    fn handle(&mut self, pos: usize, e: &(&[u8], &[u8], H, &[u8])) -> Option<usize> {
+        if era().is_2009() {
+            return self.handle09(pos, e);
+        }
+        let (body, total) = self.body(pos, e.0, e.1)?;
+        let empty = re(0, &body);
+        self.handle14(pos, e, body, total, empty)
+    }
+
+    fn handle14(&mut self, pos: usize, e: &(&[u8], &[u8], H, &[u8]), mut body: Vec<u8>, total: usize, empty: bool) -> Option<usize> {
+        let (_tag, _term, h, delims) = *e;
         match h {
             H::Level(ch, rx) => {
                 if empty {
@@ -3067,7 +3552,7 @@ impl St<'_> {
                 };
                 let v = atoi(&v).clamp(CLAMP[ch].0, CLAMP[ch].1);
                 let m = self.span(pos, total);
-                self.put(b"\xfd\xfe", m);
+                self.put(if era().is_2009() { b"\xa2\xfe" } else { b"\xfd\xfe" }, m);
                 let p = self.out.len() as i32;
                 self.chans[ch].pos.push(p);
                 self.chans[ch].val.push(v);
@@ -3237,14 +3722,15 @@ impl Initial {
 /// `FUN_1002e990`: the longest matching tag entry, then its handler.
 fn try_tag(st: &mut St, pos: usize) -> Option<usize> {
     let rest = st.rest(pos);
+    let tags: &[(&[u8], &[u8], H, &[u8])] = if era().is_2009() { &TAGS09 } else { &TAGS };
     let mut best: Option<usize> = None;
-    for (i, e) in TAGS.iter().enumerate() {
+    for (i, e) in tags.iter().enumerate() {
         let n = e.0.len();
-        if rest.len() >= n && !rest[..n].contains(&0) && strnicmp(rest, e.0, n) == 0 && best.map_or(true, |b| TAGS[b].0.len() < n) {
+        if rest.len() >= n && !rest[..n].contains(&0) && strnicmp(rest, e.0, n) == 0 && best.map_or(true, |b| tags[b].0.len() < n) {
             best = Some(i);
         }
     }
-    let e = TAGS[best?];
+    let e = tags[best?];
     let (ol, bl, cl) = (st.out.len(), st.b.len(), st.c.len());
     let r = st.handle(pos, &e);
     if r.is_none() {
@@ -3294,6 +3780,12 @@ fn pair(ch: &mut Chan) {
 }
 
 pub fn initial(src: &[u8]) -> Initial {
+    initial_era(src, Era::V2014)
+}
+
+/// 2009: julie09 `FUN_1001e0d0`, paul09 `FUN_1001e340`.
+pub fn initial_era(src: &[u8], era: Era) -> Initial {
+    set_era(era);
     let src = cs(src);
     if src.is_empty() {
         return Initial {

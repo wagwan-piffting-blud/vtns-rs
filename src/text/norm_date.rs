@@ -410,7 +410,7 @@ fn context(fe: &Fe, t: &[u8], p0: usize, off0: i32, mode: u8, mut u: i32, a: &To
 
 fn punct_next(dc: &Tok) -> bool {
     matches!(dc.class, 8 | 3 | 7)
-        && ((dc.text[0] != 0 && strchr(s(0x100802c0), dc.text[0])) || strcmp(s(0x100802bc), &dc.text) == 0 || strcmp(s(0x100802b8), &dc.text) == 0)
+        && ((dc.text[0] != 0 && strchr(s(0x100802c0), dc.text[0])) || strcmp(s(0x100802bc), &dc.text) == 0 || (!era().is_2009() && strcmp(s(0x100802b8), &dc.text) == 0))
 }
 
 /// The token after the date must end it: glued punctuation, or a word,
@@ -482,7 +482,8 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
             }
         }
     }
-    if !next_ok(dc) {
+    // julie09 FUN_100351d0 has no next-token pre-check.
+    if !era().is_2009() && !next_ok(dc) {
         return false;
     }
     let txt = |sc: &Sc, i: usize| sc.sl[i].text;
@@ -564,7 +565,8 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
             if tag!(0) != b'w' {
                 return true;
             }
-            sc.sl[0].len > 2 && (hint == 3 || sc.sl[0].flag != 0)
+            // 2009 FUN_10034ff0 / FUN_100351d0 case 7: the context hint is only 0 or 1 there
+            sc.sl[0].len > 2 && (hint == if era().is_2009() { 2 } else { 3 } || sc.sl[0].flag != 0)
         }
         10 => {
             if nn == 2 {
@@ -603,6 +605,9 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
         }
         12 => {
             if tag!(0) == b'A' {
+                if era().is_2009() {
+                    return hint != 0 || sc.sl[0].flag != 0;
+                }
                 if sc.sl[0].len < 3 {
                     return hint != 0 && sc.sl[0].flag != 0;
                 }
@@ -634,17 +639,19 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
                     return false;
                 }
                 if b.len != 0 && sc.sl[0].ws < 1 {
-                    if b.class != 3 || strcmp(s(0x100802bc), &b.text) != 0 || strcmp(s(0x100802b8), &b.text) != 0 || sc.sl[0].ws != 0 {
+                    // julie09 compares against the `a2 fe` marker only.
+                    if b.class != 3 || strcmp(s(0x100802bc), &b.text) != 0 || (!era().is_2009() && strcmp(s(0x100802b8), &b.text) != 0) || sc.sl[0].ws != 0 {
                         return false;
                     }
                 }
-                if sc.sl[0].len < 2 && sc.sl[2].len < 2 {
+                if sc.sl[0].len < 2 && (era() != crate::era::Era::Paul09 || sc.sl[1].len < 2) && sc.sl[2].len < 2 {
                     return false;
                 }
                 if sc.sl[1].ws != 0 || sc.sl[2].ws != 0 {
                     return false;
                 }
-                let dash_slash = |v: i16| v != 0 && strchr(s(0x1008028c), v as u8);
+                let seps = if era().is_2009() { 0x100802a8 } else { 0x1008028c };
+                let dash_slash = |v: i16| v != 0 && strchr(s(seps), v as u8);
                 if !dash_slash(sc.sl[0].sep) || !dash_slash(sc.sl[1].sep) {
                     return false;
                 }
@@ -654,7 +661,7 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
                 if dc.class == 1 && cls(dc.text[0]) & 0x80 != 0 {
                     return false;
                 }
-                if sc.sl[0].ws < 2 && a.len > 0 && stricmp(&a.text, s(0x100802b4)) == 0 && b.ws == 0 && b.len < 3 && b.text[0] == b'.' {
+                if era() != crate::era::Era::Paul09 && sc.sl[0].ws < 2 && a.len > 0 && stricmp(&a.text, s(0x100802b4)) == 0 && b.ws == 0 && b.len < 3 && b.text[0] == b'.' {
                     return false;
                 }
             }
@@ -739,7 +746,7 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
                 if mon(&s0) >= 0 && p2[1] == b'D' && !is_days(&s1) {
                     set!(0 => b'M', 1 => b'D');
                 }
-                if day(&s0) >= 0 && p2[1] == b'M' {
+                if (era().is_2009() && p2[0] == b'D' && !is_days(&s0) && mon(&s1) >= 0) || (day(&s0) >= 0 && p2[1] == b'M') {
                     set!(0 => b'D', 1 => b'M');
                 }
                 if (p2[0] == b'Y' && !is_days(&s0) && mon(&s1) >= 0) || (yr(&s0, 0) >= 0 && p2[1] == b'M') {
@@ -763,6 +770,25 @@ fn validate(sc: &mut Sc, p2: &mut [u8], idx: usize, hint: i16, a: &Tok, b: &Tok,
                 set!(0 => b'M', 1 => b'Y');
             }
             nn < 1 && tag!(0) != tag!(1)
+        }
+        18 if era().is_2009() => {
+            // julie09 FUN_100351d0 case 0x12
+            if nn == 1 {
+                let s0 = txt(sc, 0);
+                if day(&s0) < 0 {
+                    if yr(&s0, 0) < 0 {
+                        return false;
+                    }
+                    sc.sl[0].tag = b'Y';
+                } else {
+                    sc.sl[0].tag = b'D';
+                }
+                return strcmp(&sc.sl[1].text, s(0x100790c8)) != 0 || hint != 0 || sc.sl[1].flag != 0;
+            }
+            if nn > 0 {
+                return false;
+            }
+            tag!(0) == b'D' || tag!(0) == b'Y'
         }
         18 => {
             if nn == 1 {
@@ -1072,7 +1098,7 @@ pub fn date(fe: &Fe, wa: &mut Wa, _tok: &mut Tok, t: &[u8], p: usize, off: i32) 
         } else if pi == 0 && stricmp(s(0x10077688), &x.text) == 0 {
             tag = b'I';
             cl[k] = b'I';
-        } else if ((t0 == b's' && x.len == 1) || (x.len == 2 && stricmp(s(0x100773a0), &x.text) == 0)) && x.ws == 0 && k > 0 && pat[pi - 1] != b'D' && cl[k - 1] == b'N' {
+        } else if ((t0 == b's' && x.len == 1) || (x.len == 2 && era() != crate::era::Era::Paul09 && stricmp(s(0x100773a0), &x.text) == 0)) && x.ws == 0 && k > 0 && pat[pi - 1] != b'D' && cl[k - 1] == b'N' {
             tag = b's';
             cl[k] = b's';
         } else if stricmp(s(0x100802a4), &x.text) == 0 || stricmp(s(0x100802a0), &x.text) == 0 || stricmp(s(0x1008029c), &x.text) == 0 || stricmp(s(0x10080298), &x.text) == 0 {
@@ -1219,14 +1245,20 @@ pub fn date(fe: &Fe, wa: &mut Wa, _tok: &mut Tok, t: &[u8], p: usize, off: i32) 
             }
             let u = sc.sl[ls].end - off;
             let mut dc = Tok::default();
-            if matches!(idx, 7 | 0xc | 0xd | 0x11 | 0x12 | 0x15) {
+            if era().is_2009() {
+                // 2009 FUN_10033b70 / FUN_10033d10: no hint for 0x12, and a nonzero context only sets it to 1
+                if matches!(idx, 7 | 0xc | 0xd | 0x11 | 0x15) && context(fe, t, p, off, b'B', u, &a, &b, &mut dc) != 0 {
+                    hint = 1;
+                }
+            } else if matches!(idx, 7 | 0xc | 0xd | 0x11 | 0x12 | 0x15) {
                 hint = context(fe, t, p, off, b'B', u, &a, &b, &mut dc) as i16;
             }
             sc.n = kk as i32;
-            if dc.len == 0 {
+            if dc.len == 0 && !era().is_2009() {
                 tokenize(&mut dc, t, sc.sl[ls].tp, 0, 3, fe.ud.as_ref());
             }
-            if validate(&mut sc, &mut cl, idx, hint, &a, &b, &dc) {
+            let vr = validate(&mut sc, &mut cl, idx, hint, &a, &b, &dc);
+            if vr {
                 return if emit_date(fe, wa, t, &mut sc, idx) { u } else { 0 };
             }
             break;

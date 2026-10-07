@@ -127,6 +127,8 @@ pub fn word(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -
                 None => split_hyphen(wa, &txt, tok.start, tok.end, 0x41, 0x44, 0x18, kind),
             }
         }
+        // julie09 FUN_10037ab0 has no '@' look-ahead.
+        None if fe.era.is_2009() => split_hyphen(wa, &txt, tok.start, tok.end, 0x41, 0x44, 0x18, kind),
         None => {
             let mut x = Tok::default();
             let c = tok.consumed as usize;
@@ -282,7 +284,10 @@ pub const UNPORTED_GUARD: bool = true;
 /// Its only other effect, re-zeroing the shared scratch at WA+0x39e4, is
 /// redone by every user on entry. Confirmed live: 0 wins in 220 calls over
 /// the parity corpus's `math*.txt`.
-pub fn math(_fe: &Fe, _wa: &mut Wa, _tok: &mut Tok, _t: &[u8], _p: usize, _off: i32) -> i32 {
+pub fn math(fe: &Fe, wa: &mut Wa, _tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    if fe.era.is_2009() {
+        return super::norm_math::math09(fe, wa, t, p, off);
+    }
     -1
 }
 
@@ -296,6 +301,8 @@ pub fn symbols_cp(fe: &Fe, wa: &mut Wa, _tok: &mut Tok, t: &[u8], p: usize, off:
     let w = match x.text[0] {
         0xa9 => s(0x100804fc),
         0xb6 => s(0x100804f0),
+        // paul09 FUN_1003a200 also names the micro sign.
+        0xb5 if era() == crate::era::Era::Paul09 => b"micro",
         _ => return -1,
     };
     if !wa.emit(w, x.start, x.end, 0x53, 0x44, 2) {

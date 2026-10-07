@@ -312,7 +312,9 @@ pub fn state_zip(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, flag: bool)
     let (mut p, mut o) = (p, off);
     let mut prev_src = 0u8;
     let mut k = 0;
-    while sl.len() <= 4 {
+    let e09 = fe.era.is_2009();
+    // julie09 FUN_1004fbe0: at most 4 slots and no country slot.
+    while sl.len() <= if e09 { 3 } else { 4 } {
         let (w, r0) = tk(fe, t, p, o, 0x15);
         if r0 == 0 || w.class == 9 {
             break;
@@ -337,7 +339,7 @@ pub fn state_zip(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, flag: bool)
         }
         let prev_tag = sl.last().map(|x| x.tag).unwrap_or(0);
         let country = stricmp(&text, s(0x100814ec)) == 0 || stricmp(&text, s(0x100814e8)) == 0 || stricmp(&text, s(0x100814d8)) == 0;
-        let (tag, src, exp): (u8, u8, Vec<u8>) = if prev_tag == b'S' && country && w.ws <= 2 {
+        let (tag, src, exp): (u8, u8, Vec<u8>) = if !e09 && prev_tag == b'S' && country && w.ws <= 2 {
             (b'N', b'N', text.clone())
         } else if k >= 1 && matches!(prev_src, b'U' | b'C') && w.class == 3 && w.len == 1 && c0 != 0 && strchr(s(0x10080540), c0) && w.ws <= 2 {
             (b'L', b'L', Vec::new())
@@ -393,16 +395,27 @@ pub fn state_zip(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, flag: bool)
     let tags: Vec<u8> = sl.iter().map(|x| x.tag).collect();
     let mut n = sl.len();
     while n >= 1 {
-        let (lo, hi) = match n {
-            5 => (0, 1),
-            4 => (1, 3),
-            3 => (3, 5),
-            2 => (5, 7),
-            _ => (7, PATTERNS.count()),
+        let (lo, hi) = if e09 {
+            // The 4-entry table (SZLZ SZZ SZ S) uses the 2014 validator cases 1, 3, 5, 7.
+            match n {
+                4 => (0, 1),
+                3 => (1, 2),
+                2 => (2, 3),
+                _ => (3, PATTERNS.count()),
+            }
+        } else {
+            match n {
+                5 => (0, 1),
+                4 => (1, 3),
+                3 => (3, 5),
+                2 => (5, 7),
+                _ => (7, PATTERNS.count()),
+            }
         };
         for i in lo..hi {
             if strcmp(PATTERNS.get(i), &tags[..n]) == 0 {
-                if validate(fe, t, &sl[..n], i, flag) {
+                let case = if e09 { 2 * i + 1 } else { i };
+                if validate(fe, t, &sl[..n], case, flag) {
                     let consumed = sl[n - 1].end - off;
                     return if emit(wa, &sl[..n]) { consumed } else { 0 };
                 }

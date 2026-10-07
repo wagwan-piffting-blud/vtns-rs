@@ -112,17 +112,20 @@ fn validate(sl: &mut [Slot], idx: i32) -> bool {
 
 /// `FUN_10059ef0`.
 fn emit(wa: &mut Wa, sl: &[Slot]) -> bool {
+    // paul09 FUN_10054400: no 'E' text case and no comma pause.
+    let paul = era() == crate::era::Era::Paul09;
     for x in sl {
         let ok = match x.tag {
             b's' => true,
             b'I' => wa.emit_split(&x.text, x.start, x.end, 0x41, 0x53, 0x16),
-            b'N' | b'W' | b'E' => wa.emit_split(&x.text, x.start, x.end, 0x41, 0x44, 0x16),
+            b'N' | b'W' => wa.emit_split(&x.text, x.start, x.end, 0x41, 0x44, 0x16),
+            b'E' if !paul => wa.emit_split(&x.text, x.start, x.end, 0x41, 0x44, 0x16),
             _ => wa.emit_split(&x.exp, x.start, x.end, 0x41, 0x44, 0x16),
         };
         if !ok {
             return false;
         }
-        if x.comma == 1 {
+        if x.comma == 1 && !paul {
             let r = wa.n() as i32 - 1;
             wa.set_ri32(r, 0x2c, 5);
         }
@@ -257,7 +260,24 @@ pub fn name(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
     };
     let mut n = sl.len();
     while n >= 1 {
-        let range = match (mode, n) {
+        // paul09 FUN_10053be0: 26 shapes, "TNR" missing; its validator cases from 9 on are the 2014 ones minus 1.
+        let paul = era() == crate::era::Era::Paul09;
+        let range = if paul {
+            match (mode, n) {
+                (1, 5) => Some((0, 3)),
+                (1, 4) => Some((3, 7)),
+                (1, 3) => Some((7, 0xa)),
+                (1, 2) => Some((0xa, 0xd)),
+                (2, 5) => Some((0xd, 0xe)),
+                (2, 4) => Some((0xe, 0x12)),
+                (2, 3) => Some((0x12, 0x16)),
+                (2, 2) => Some((0x16, 0x17)),
+                (3, 4) => Some((0x17, 0x19)),
+                (3, 3) => Some((0x19, PATTERNS.count())),
+                _ => None,
+            }
+        } else {
+        match (mode, n) {
             (1, 5) => Some((0, 3)),
             (1, 4) => Some((3, 7)),
             (1, 3) => Some((7, 0xb)),
@@ -269,13 +289,14 @@ pub fn name(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             (3, 4) => Some((0x18, 0x1a)),
             (3, 3) => Some((0x1a, PATTERNS.count())),
             _ => None,
+        }
         };
         if let Some((a, b)) = range {
             let ks = &kinds[..n];
             for i in a..b {
                 if PATTERNS.get(i) == ks {
                     let ret = sl[n - 1].end - off;
-                    if validate(&mut sl, i) {
+                    if validate(&mut sl, if paul && i >= 9 { i + 1 } else { i }) {
                         return if emit(wa, &sl[..n]) { ret } else { 0 };
                     }
                     break;

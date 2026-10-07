@@ -1009,7 +1009,7 @@ fn fraction_tag(fe: &Fe, wa: &mut Wa, t: &[u8], cp: usize, coff: i32, close: usi
         } else if denom && x.class == 2 && numeric(&x.text) {
             let mut buf = new_buf();
             ordinal_numeral_words(&mut buf, &x.text);
-            if plural {
+            if plural && !fe.era.is_2009() {
                 strcat(&mut buf, s(0x10077770));
                 plural = false;
             }

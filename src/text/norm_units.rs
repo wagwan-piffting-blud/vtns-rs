@@ -302,7 +302,7 @@ pub(crate) const DICT_C: [(Rec5a, bool); 2] = [(rec5a(0x1008fab0, 0x1009b0b0), t
 /// `FUN_10040ab0`.
 pub(crate) fn dict_find(out: &mut [u8], dict: &[(Rec5a, bool)], w: &[u8], plural: bool) -> bool {
     out[0] = 0;
-    for &(tab, ins) in dict {
+    for &(tab, ins) in dict.iter() {
         let i = if ins { tab.find_prefix(w, true) } else { tab.find_exact(w) };
         if i >= 0 {
             spell_rec(out, plural, tab, i);
@@ -418,12 +418,94 @@ fn phrase_unit(fe: &Fe, tab: Rec5a, w: &[u8], t: &[u8], p: usize, off: i32, used
     }
 }
 
+/// paul09 `FUN_1003d680`: the word, then up to three more words joined with `-` (a glued `-` is skipped),
+/// looked up whole in the unit-name table; the result is the typed phrase with its hyphens read as blanks.
+/// A miss on the first word is retried without its last letter when that is the record's plural suffix.
+#[allow(clippy::too_many_arguments)]
+fn phrase_lookup_paul(fe: &Fe, out: &mut [u8], tab: Rec5a, w: &[u8], t: &[u8], p: usize, off: i32, used: &mut i32) -> bool {
+    let mut key: Vec<u8> = Vec::new();
+    let mut res: Vec<u8> = Vec::new();
+    let mut found = false;
+    let mut total = strlen(w) as i32;
+    let mut count = 0;
+    let mut c6 = 0i32;
+    while count < 4 {
+        let adv;
+        if c6 < 1 {
+            key = cs(w).to_vec();
+            adv = *used;
+        } else {
+            let (x, r) = tk(fe, t, p + c6 as usize, off + c6, 0);
+            if r == 0 || x.class == 9 {
+                break;
+            }
+            total += 1 + x.len;
+            if total > 0x1e {
+                break;
+            }
+            if (x.class == 3 || x.class == 7) && x.len == 1 && x.text[0] == b'-' && x.ws == 0 {
+                c6 += r;
+                continue;
+            }
+            if x.class == 1 && x.ws < 2 {
+                if !key.is_empty() {
+                    key.push(b'-');
+                }
+                key.extend_from_slice(x.text());
+                adv = r;
+            } else {
+                break;
+            }
+        }
+        c6 += adv;
+        let i = tab.find_prefix(&key, true);
+        if i < 0 {
+            if !found && key.len() > 2 {
+                let stem = &key[..key.len() - 1];
+                let j = tab.find_prefix(stem, true);
+                if j >= 0 && at(tab.field(j, 0x3c), 0) == b'-' && at(tab.field(j, 0x3c), 1) == key[key.len() - 1] {
+                    for c in key.iter_mut() {
+                        if *c == b'-' {
+                            *c = b' ';
+                        }
+                    }
+                    res = key.clone();
+                    if count > 0 {
+                        *used = c6;
+                    }
+                    found = true;
+                }
+            }
+        } else {
+            for c in key.iter_mut() {
+                if *c == b'-' {
+                    *c = b' ';
+                }
+            }
+            res = key.clone();
+            if count > 0 {
+                *used = c6;
+            }
+            found = true;
+        }
+        count += 1;
+    }
+    if !found {
+        return false;
+    }
+    strcpy(out, &res);
+    true
+}
+
 /// `FUN_10040b60`: the multi-word unit table (also `word` minus its last
 /// letter when that letter is the record's plural suffix).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn phrase_lookup(fe: &Fe, out: &mut [u8], w: &[u8], t: &[u8], p: usize, off: i32, used: &mut i32) -> bool {
     out[0] = 0;
     let tab = rec5a(0x10090490, 0x1009b0b8);
+    if era() == crate::era::Era::Paul09 {
+        return phrase_lookup_paul(fe, out, tab, w, t, p, off, used);
+    }
     let mut pl = false;
     let i = phrase_unit(fe, tab, w, t, p, off, used, &mut pl);
     if i >= 0 {

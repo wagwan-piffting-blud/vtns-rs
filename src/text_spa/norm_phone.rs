@@ -374,7 +374,10 @@ fn render(wa: &mut WaSpa, tel_fax: Option<&TelFax>, entries: &[Entry]) -> bool {
     true
 }
 
-pub fn phone(_fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
+pub fn phone(fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
+    if fe.era.is_2009() {
+        return super::norm_phone09::phone09(wa, tok, t, p, off);
+    }
     let wa_words = wa.i16(0);
     let mut cap_p = p;
     let mut cap_off = off;

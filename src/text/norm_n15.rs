@@ -101,6 +101,10 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         return -1;
     }
     let w1 = t1.text();
+    let e09 = era().is_2009();
+    let julie = era() == crate::era::Era::Julie09;
+    // 2009: a recognizer that matched its trigger word but failed returns -1 instead of reaching the tables
+    let mut hit = false;
     let upper1 = cls(w1[0]) & 0x80 != 0;
     let lead = off == 0 || (off > 0 && t1.ws > 0);
     let vol = [s(0x1008001c), s(0x10080018), s(0x10079178), s(0x10080014)].iter().any(|v| stricmp(w1, v) == 0);
@@ -123,8 +127,16 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             if bad(r2, &t2) {
                 return -1;
             }
+        } else if e09 {
+            // paul09 FUN_1002fc40 has no such check; julie09 FUN_1002fa10 returns -1
+            if julie && (t1.len != 2 || upper(w1[0]) != 0x50) {
+                return -1;
+            }
         } else if t1.len != 2 || upper(w1[0]) != 0x50 {
             ok = false;
+        }
+        if e09 && !(t2.class == 2 && t2.ws < 2 && num_str(&t2.text)) {
+            return -1;
         }
         if ok && t2.class == 2 && t2.ws < 2 && num_str(&t2.text) {
             let word = match upper(w1[0]) {
@@ -162,7 +174,8 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         return table(fe, wa, t, p, off);
     }
 
-    if is_mr(w1) {
+    // 2009 FUN_1002fc40 / FUN_1002fa10 gate on "Mr" and "Ms" only; "Mrs" falls through to the tables
+    if if e09 { stricmp(w1, s(0x10080010)) == 0 || stricmp(w1, s(0x10080008)) == 0 } else { is_mr(w1) } {
         return honorifics(fe, wa, t, p, off, &t1, r1);
     }
 
@@ -175,6 +188,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         // uninitialized token buffers anyway. In the 64-bit build (0x18003b790) the
         // middle one still holds this capitalized word from an earlier recognizer.
         let stale = bw as i16 == 0 && fe.x64;
+        hit = true;
         if stale || cap(&c) || cap(&b) || (cap(&a) && b.ws == 0 && b.len < 3 && b.text[0] == b'.') {
             let mut cons = r1;
             let (q, qo) = (p + r1 as usize, off + r1);
@@ -185,7 +199,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             if w1[0] != b'C' {
                 return if wa.emit(s(0x1007ffec), t1.start, t1.end, 0x41, 0x44, 0x16) { cons } else { 0 };
             }
-            if (t2.class == 3 || t2.class == 7) && t2.len == 1 && t2.text[0] == b'-' && t2.ws == 0 {
+            if era() != crate::era::Era::Paul09 && (t2.class == 3 || t2.class == 7) && t2.len == 1 && t2.text[0] == b'-' && t2.ws == 0 {
                 return -1;
             }
             return if wa.emit(s(0x1007fff8), t1.start, t1.end, 0x41, 0x44, 0x16) { cons } else { 0 };
@@ -212,6 +226,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         }
         return t1.consumed;
     } else if stricmp(w1, s(0x1007ffd4)) == 0 {
+        hit = true;
         let mut cons = r1;
         let (mut q, mut qo) = (p + r1 as usize, off + r1);
         let (mut t2, r2) = tk(fe, t, q, qo, 0);
@@ -233,6 +248,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             return if wa.emit(s(0x1007ffc4), t1.start, t1.end, 0x41, 0x44, 0x16) { t1.consumed } else { 0 };
         }
     } else if stricmp(w1, s(0x1007ffc0)) == 0 && upper1 {
+        hit = true;
         let mut cons = r1;
         let (mut q, mut qo) = (p + r1 as usize, off + r1);
         let (mut t2, r2) = tk(fe, t, q, qo, 0);
@@ -250,6 +266,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         }
     } else if stricmp(w1, s(0x1007ffb4)) == 0 || stricmp(w1, s(0x1007ffac)) == 0 {
         if t1.ws < 3 {
+            hit = true;
             let c = prev_one(t, p, off, 0);
             if c.len > 0 && c.class == 1 && cls(c.text[0]) & 0x80 != 0 {
                 let w = if t1.len == 3 { s(0x1007ffa4) } else { s(0x1007ff9c) };
@@ -257,6 +274,7 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             }
         }
     } else if upper(w1[0]) == 0x57 && t1.ws < 3 && t1.len == 1 {
+        hit = true;
         let (q, qo) = (p + r1 as usize, off + r1);
         let (t2, r2) = tk(fe, t, q, qo, 0);
         if bad(r2, &t2) {
@@ -290,11 +308,45 @@ fn abbr(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
             }
         }
     }
+    if e09 {
+        return if hit { -1 } else { table09(fe, wa, t, p, off, &t1, r1, julie) };
+    }
     table(fe, wa, t, p, off)
+}
+
+/// The two expansion tables of paul09 `FUN_1002fc40` / julie09 `FUN_1002fa10`: the first table is searched with
+/// the mode-0 token, only the second one with a mode-0x1b token.
+#[allow(clippy::too_many_arguments)]
+fn table09(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, t1: &Tok, r1: i32, julie: bool) -> i32 {
+    let i = ABBR_I.find(t1.text(), true);
+    if i >= 0 {
+        return if wa.emit_split(ABBR_I.field(i, 0x10), t1.start, t1.end, 0x41, 0x44, 0x16) { r1 } else { 0 };
+    }
+    let (tb, rb) = tk(fe, t, p, off, 0x1b);
+    if rb == 0 || tb.class == 9 {
+        return -1;
+    }
+    let j = ABBR_S.find(tb.text(), false);
+    if j < 0 {
+        return -1;
+    }
+    let mut word = ABBR_S.field(j, 0x10);
+    if julie {
+        let (t2, _) = tk(fe, t, p + rb as usize, off + rb, 0);
+        if stricmp(tb.text(), s(0x1007ff54)) == 0 && t2.len > 0 && stricmp(t2.text(), s(0x1007ff48)) == 0 {
+            word = s(0x1007ff38);
+        }
+    }
+    if wa.emit_split(word, tb.start, tb.end, 0x41, 0x44, 0x16) {
+        rb
+    } else {
+        0
+    }
 }
 
 /// The "Mr"/"Mrs"/"Ms" half of `FUN_10032180` (from `0x10032ca7`).
 fn honorifics(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, t1: &Tok, r1: i32) -> i32 {
+    let e09 = era().is_2009();
     let mut cons = r1;
     let (mut q, mut qo) = (p + r1 as usize, off + r1);
     let (mut t2, mut r2) = tk(fe, t, q, qo, 0);
@@ -310,12 +362,15 @@ fn honorifics(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, t1: &Tok, r1: 
         let x = tk(fe, t, q, qo, 0);
         t2 = x.0;
         r2 = x.1;
+        if e09 && bad(r2, &t2) {
+            return -1;
+        }
     }
     if t2.len <= 0 {
-        return table(fe, wa, t, p, off);
+        return if e09 { -1 } else { table(fe, wa, t, p, off) };
     }
     let w2 = t2.text();
-    let conj = t2.udict == 0 && ((w2[0] == b'&' && t2.len == 1) || stricmp(w2, s(0x10077400)) == 0 || stricmp(w2, s(0x1007901c)) == 0) && t2.ws < 3;
+    let conj = t2.udict == 0 && ((w2[0] == b'&' && t2.len == 1) || stricmp(w2, s(0x10077400)) == 0 || (!e09 && stricmp(w2, s(0x1007901c)) == 0)) && t2.ws < 3;
     if conj {
         cons += r2;
         q += r2 as usize;
@@ -325,12 +380,12 @@ fn honorifics(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, t1: &Tok, r1: 
             return -1;
         }
         if !is_mr(t3.text()) {
-            return table(fe, wa, t, p, off);
+            return if e09 { -1 } else { table(fe, wa, t, p, off) };
         }
         if !wa.emit(honorific(t1), t1.start, t1.end, 0x41, 0x44, 0x16) {
             return 0;
         }
-        let w = if upper(w2[0]) == 0x4f { s(0x1007901c) } else { s(0x10077400) };
+        let w = if !e09 && upper(w2[0]) == 0x4f { s(0x1007901c) } else { s(0x10077400) };
         if !wa.emit(w, t2.start, t2.end, 0x41, 0x44, 0x16) {
             return 0;
         }
@@ -352,7 +407,7 @@ fn honorifics(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, t1: &Tok, r1: 
         let w1 = t1.text();
         let exact = strcmp(w1, s(0x10080010)) == 0 || strcmp(w1, s(0x1008000c)) == 0 || strcmp(w1, s(0x10080008)) == 0;
         if !exact || !cap {
-            return table(fe, wa, t, p, off);
+            return if e09 { -1 } else { table(fe, wa, t, p, off) };
         }
     }
     if wa.emit(honorific(t1), t1.start, t1.end, 0x41, 0x44, 0x16) {
@@ -418,7 +473,14 @@ fn ugc_code(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32) -> i32 {
         return -1;
     }
 
-    let b = if no_lowercase(&w1.text) {
+    let b = if fe.era.is_2009() {
+        // julie09 FUN_1002f670: spelled unless it has a lowercase letter and more than one letter.
+        if no_lowercase(&w1.text) || w1.len == 1 {
+            0x53
+        } else {
+            0x44
+        }
+    } else if no_lowercase(&w1.text) {
         if vowel_count(&w1.text) != 0 && w1.len > 2 {
             if w1.len == 1 {
                 0x53

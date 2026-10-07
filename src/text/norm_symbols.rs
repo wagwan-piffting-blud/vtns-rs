@@ -271,7 +271,8 @@ fn possessive(fe: &Fe, wa: &mut Wa, tok: &Tok, t: &[u8], p: usize, off: i32, n8:
         let hard_end = matches!(nx.class, 3 | 9 | 8 | 7) || nx.ws >= 1;
         if !in_tail || !hard_end {
             let soft_end = matches!(nx.class, 9 | 8 | 7) || nx.ws > 0;
-            if b.len > 2 && b.class == 1 && lower(b.text[(b.len - 1) as usize]) == 0x73 && soft_end && wa.ri32(prev, 8) + 2 < 0x1d {
+            // paul09 FUN_1004f790 has no "s'" rule.
+            if era() != crate::era::Era::Paul09 && b.len > 2 && b.class == 1 && lower(b.text[(b.len - 1) as usize]) == 0x73 && soft_end && wa.ri32(prev, 8) + 2 < 0x1d {
                 let pt = wa.text(prev).to_vec();
                 strcpy(&mut out, &pt);
                 strcat(&mut out, b"'");
@@ -463,7 +464,8 @@ fn other_punct(fe: &Fe, wa: &mut Wa, tok: &Tok, t: &[u8], p: usize, off: i32, n8
         }
         return mark_after(wa, &nx, tok);
     }
-    if (c0 == b'(' || c0 == b'[') && len == 1 {
+    // paul09 FUN_1004f790 handles only `(` here
+    if (c0 == b'(' || (c0 == b'[' && era() != crate::era::Era::Paul09)) && len == 1 {
         let u5 = tok.consumed;
         let d = close_bracket(&t[(p + u5 as usize).min(t.len())..]);
         if d == 0 {
@@ -611,7 +613,12 @@ fn close_bracket(x: &[u8]) -> i32 {
         if c == 0 || sp > 2999 {
             return 0;
         }
-        if c == b')' || c == b']' {
+        if era() == crate::era::Era::Paul09 {
+            // paul09 FUN_1005c9c0: only `)` closes, and not when another `(` follows it.
+            if c == b')' && at(x, i as isize + 1) != b'(' {
+                return i as i32;
+            }
+        } else if c == b')' || c == b']' {
             return i as i32;
         }
         if at(x, 0) == b' ' {

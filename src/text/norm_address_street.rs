@@ -17,6 +17,7 @@
 
 use super::cstr::*;
 use super::norm_address_city::city;
+use crate::era::Era;
 use super::numwords::{new_buf, ordinal_numeral, ordinal_numeral_words, pairs};
 use super::tabs::{ptab, rec30, Ptab, Rec30};
 use super::tokenize::{tokenize, Tok};
@@ -171,7 +172,10 @@ fn validate(sl: &[Slot], idx: i32, flag: bool) -> Option<Vec<Slot>> {
                 false
             } else if eq(&t(0), 0x10080840) && s1 {
                 false
-            } else if !flag && ((eq(&t(0), 0x10080858) && eq(&t(1), 0x10080854) && s1) || [0x1008083c, 0x10080838, 0x10080834, 0x1007ffd4].iter().any(|&v| eq(&t(1), v))) {
+            } else if !flag
+                && ((eq(&t(0), 0x10080858) && eq(&t(1), 0x10080854) && s1)
+                    || [0x1008083c, 0x10080838, 0x10080834, 0x1007ffd4].iter().any(|&v| eq(&t(1), v) && !(v == 0x1008083c && era().is_2009())))
+            {
                 false
             } else {
                 true
@@ -279,7 +283,7 @@ pub fn street(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32)
             qo += r;
             continue;
         }
-        if (x.class == 3 || x.class == 7) && x.len == 1 && c0 == b',' && k > 0 && prev_src != b',' && c > 0 && matches!(tags[c - 1], b'5' | b'2' | b'4') {
+        if (x.class == 3 || x.class == 7) && x.len == 1 && c0 == b',' && k > 0 && (prev_src != b',' || fe.era.is_2009()) && c > 0 && matches!(tags[c - 1], b'5' | b'2' | b'4') {
             srcs.push(b',');
             sl[c - 1].comma = r;
             q += r as usize;
@@ -445,7 +449,47 @@ pub fn street(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32)
         } else {
             full.clone()
         };
-        let (lo, hi) = match (mode, cmp.len()) {
+        // julie09 FUN_10040620: 28 patterns; from index 10 on the validator cases are the 2014 ones minus 2.
+        let e09 = fe.era.is_2009();
+        let paul = fe.era == Era::Paul09;
+        let (lo, hi) = if paul {
+            // paul09 FUN_10040030: no "14" shape (27 patterns).
+            match (mode, cmp.len()) {
+                (1, 6) => (0, 3),
+                (1, 5) => (3, 7),
+                (1, 4) => (7, 11),
+                (1, 3) => (11, 15),
+                (2, 4) => (15, 16),
+                (2, 3) => (16, 17),
+                (2, 2) => (17, 18),
+                (3, 6) => (18, 19),
+                (3, 4) => (19, 20),
+                (3, 3) => (20, 22),
+                (3, 2) => (22, 25),
+                (4, 3) => (25, 26),
+                (5, 2) => (26, PATTERNS.count()),
+                _ => (0, 0),
+            }
+        } else if e09 {
+            match (mode, cmp.len()) {
+                (1, 6) => (0, 3),
+                (1, 5) => (3, 7),
+                (1, 4) => (7, 11),
+                (1, 3) => (11, 15),
+                (1, 2) => (15, 16),
+                (2, 4) => (16, 17),
+                (2, 3) => (17, 18),
+                (2, 2) => (18, 19),
+                (3, 6) => (19, 20),
+                (3, 4) => (20, 21),
+                (3, 3) => (21, 23),
+                (3, 2) => (23, 26),
+                (4, 3) => (26, 27),
+                (5, 2) => (27, PATTERNS.count()),
+                _ => (0, 0),
+            }
+        } else {
+        match (mode, cmp.len()) {
             (1, 6) => (0, 3),
             (1, 5) => (3, 7),
             (1, 4) => (7, 13),
@@ -461,6 +505,7 @@ pub fn street(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32)
             (4, 3) => (28, 29),
             (5, 2) => (29, PATTERNS.count()),
             _ => (0, 0),
+        }
         };
         for idx in lo..hi {
             if strcmp(PATTERNS.get(idx), &cmp) != 0 {
@@ -471,7 +516,8 @@ pub fn street(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32)
             if last.comma != 0 {
                 consumed += last.comma;
             }
-            if let Some(v) = validate(&sl[..n], idx, flag) {
+            let vi = if paul && idx >= 15 { idx + 1 } else { idx };
+            if let Some(v) = validate(&sl[..n], if e09 && vi >= 10 { vi + 2 } else { vi }, flag) {
                 if !emit(fe, wa, t, &v) {
                     return 0;
                 }

@@ -320,6 +320,232 @@ fn suffix_strip(lex: &Lexicon, w: &[u8]) -> Option<Vec<u8>> {
     Some(r)
 }
 
+/// 2009 `-ed` suffix: the unvoiced set has no 0x3a.
+fn ed_suffix09(last: u8) -> Vec<u8> {
+    if ED_TD.contains(&last) {
+        vec![0x23, 0x15]
+    } else if matches!(last, 0x2a | 0x35 | 0x37 | 0x20 | 0x22 | 0x38 | 0x14) {
+        vec![0x39]
+    } else {
+        vec![0x15]
+    }
+}
+
+/// julie09 `FUN_10009da0` (2014 `FUN_1000a140`): the same suffix list in the same order, but the root
+/// candidates are tried in a different order and the 'e' guards differ (decompile read block by block).
+/// Every lookup is `FUN_1000c610` (`look`) or `FUN_1000c6c0` + `FUN_1000c610` (`verb`); an empty result
+/// counts as a miss.
+fn suffix_strip09(lex: &Lexicon, w: &[u8]) -> Option<Vec<u8>> {
+    // paul09 `FUN_1000a000` is the same function without the i -> y retry of "-ness".
+    let p09 = lex.era == crate::era::Era::Paul09;
+    let n = w.len();
+    let lo = |i: usize| TOLOWER_S[w[i] as usize];
+    let cons = |i: usize| !letter_vowel(w[i]);
+    let ends = |suf: &[u8]| n >= suf.len() && stricmp(&w[n - suf.len()..], suf) == 0;
+    let cut = |k: usize| &w[..k];
+    let with_y = |k: usize| {
+        let mut s = w[..k].to_vec();
+        s.push(b'y');
+        s
+    };
+    let look = |s: &[u8]| cb30(lex, s).filter(|r| !r.is_empty());
+    let verb = |s: &[u8]| cbe0(lex, s, VB).or_else(|| cb30(lex, s)).filter(|r| !r.is_empty());
+    let add = |r: Option<Vec<u8>>, suf: &[u8]| {
+        r.map(|mut r| {
+            r.extend_from_slice(suf);
+            r
+        })
+    };
+    let doubled = |a: usize| !cons(a) && cons(a + 1) && w[a + 1] == w[a + 2];
+    let szx = |v: i16| {
+        let c = v as u8;
+        c == 0 || b"szx".contains(&c)
+    };
+
+    if n >= 9 && ends(b"liness") {
+        if let Some(r) = look(&with_y(n - 5)) {
+            return add(Some(r), &[0x2d, 0x23, 0x37]);
+        }
+        return add(look(cut(n - 6)), &[0x2b, 0x26, 0x2d, 0x23, 0x37]);
+    }
+    if n >= 7 {
+        if ends(b"ance") {
+            return add(look(cut(n - 4)), &[0x07, 0x2d, 0x37]);
+        }
+        if ends(b"ness") {
+            let mut r = look(cut(n - 4));
+            if !p09 && r.is_none() && cons(n - 6) && lo(n - 5) == 0x69 {
+                r = look(&with_y(n - 5));
+            }
+            return add(r, &[0x2d, 0x23, 0x37]);
+        }
+        if ends(b"ment") {
+            return add(look(cut(n - 4)), &[0x2c, 0x07, 0x2d, 0x39]);
+        }
+        if ends(b"ship") {
+            return add(look(cut(n - 4)), &[0x38, 0x25, 0x35]);
+        }
+        if ends(b"less") {
+            return add(look(cut(n - 4)), &[0x2b, 0x23, 0x37]);
+        }
+    }
+    if n >= 5 {
+        if ends(b"ed") {
+            let mut r = if lo(n - 3) == 0x65 { verb(cut(n - 1)) } else { verb(cut(n - 2)).or_else(|| verb(cut(n - 1))) };
+            if r.is_none() {
+                r = if !doubled(n - 5) {
+                    if cons(n - 4) && lo(n - 3) == 0x69 {
+                        verb(&with_y(n - 3))
+                    } else {
+                        None
+                    }
+                } else {
+                    verb(cut(n - 3))
+                };
+            }
+            let mut r = r?;
+            let last = *r.last().unwrap();
+            r.extend_from_slice(&ed_suffix09(last));
+            return Some(r);
+        }
+        if ends(b"er") {
+            let mut r = if lo(n - 3) == 0x65 { look(cut(n - 1)) } else { look(cut(n - 2)).or_else(|| look(cut(n - 1))) };
+            if r.is_none() {
+                r = if !doubled(n - 5) {
+                    if cons(n - 4) && lo(n - 3) == 0x69 {
+                        look(&with_y(n - 3))
+                    } else {
+                        None
+                    }
+                } else {
+                    look(cut(n - 3))
+                };
+            }
+            return add(r, &[0x1a]);
+        }
+    }
+    if n >= 6 {
+        if ends(b"ers") {
+            if let Some(r) = look(cut(n - 1)) {
+                return add(Some(r), &[0x44]);
+            }
+            let mut r = None;
+            if lo(n - 4) != 0x65 {
+                r = look(cut(n - 3));
+            }
+            if r.is_none() {
+                r = look(cut(n - 2));
+            }
+            if r.is_none() {
+                r = if !doubled(n - 6) {
+                    if cons(n - 5) && lo(n - 4) == 0x69 {
+                        look(&with_y(n - 4))
+                    } else {
+                        None
+                    }
+                } else {
+                    look(cut(n - 4))
+                };
+            }
+            return add(r, &[0x1a, 0x44]);
+        }
+        if ends(b"est") {
+            let mut r = None;
+            if lo(n - 4) != 0x65 {
+                r = look(cut(n - 3));
+            }
+            if r.is_none() {
+                r = look(cut(n - 2));
+            }
+            let mut ydone = false;
+            if r.is_none() {
+                r = if !doubled(n - 6) {
+                    if cons(n - 5) && lo(n - 4) == 0x69 {
+                        ydone = true;
+                        look(&with_y(n - 4))
+                    } else {
+                        None
+                    }
+                } else {
+                    look(cut(n - 4))
+                };
+            }
+            return if ydone { add(r, &[0x07, 0x37, 0x39]) } else { add(r, &[0x23, 0x37, 0x39]) };
+        }
+        if ends(b"ing") {
+            let mut r = verb(cut(n - 3));
+            if r.is_none() {
+                r = if !(n >= 7 && cons(n - 7) && doubled(n - 6)) {
+                    if !cons(n - 5) && cons(n - 4) {
+                        let mut e = w[..n - 3].to_vec();
+                        e.push(b'e');
+                        verb(&e)
+                    } else {
+                        None
+                    }
+                } else {
+                    verb(cut(n - 4))
+                };
+            }
+            return add(r, &[0x23, 0x2e]);
+        }
+        if ends(b"ist") {
+            return add(look(cut(n - 3)), &[0x23, 0x37, 0x39]);
+        }
+        if ends(b"ful") {
+            return add(look(cut(n - 3)), &[0x20, 0x07, 0x2b]);
+        }
+    }
+    if n < 5 {
+        return None;
+    }
+    if ends(b"ly") {
+        let mut r = look(cut(n - 2));
+        if r.is_none() && cons(n - 4) && lo(n - 3) == 0x69 {
+            r = look(&with_y(n - 3));
+        }
+        let mut r = r?;
+        let k = r.len() - 1;
+        if r[k] == 0x26 {
+            r[k] = 0x07;
+        }
+        if r[k] != 0x2b {
+            r.push(0x2b);
+        }
+        r.push(0x26);
+        return Some(r);
+    }
+    if lo(n - 1) != 0x73 {
+        return None;
+    }
+    let e2 = lo(n - 2) == 0x65;
+    let ch_sh = |at: usize| strnicmp(&w[at..], b"ch", 2) == 0 || strnicmp(&w[at..], b"sh", 2) == 0;
+    let r = if e2 && (szx(lo(n - 3)) || ch_sh(n - 4) || (cons(n - 4) && lo(n - 3) == 0x6f)) {
+        look(cut(n - 2)).or_else(|| look(cut(n - 1)))
+    } else if cons(n - 4) && strnicmp(&w[n - 3..], b"ie", 2) == 0 {
+        look(&with_y(n - 3))
+    } else if !(szx(lo(n - 2)) || ch_sh(n - 3) || (cons(n - 3) && lo(n - 2) == 0x6f)) {
+        let r = look(cut(n - 1));
+        if r.is_none() && e2 {
+            look(cut(n - 2))
+        } else {
+            r
+        }
+    } else if cons(n - 3) && lo(n - 2) == 0x6f {
+        look(cut(n - 1))
+    } else {
+        let r = look(cut(n - 1))?;
+        if S_SIBILANT.contains(r.last().unwrap()) {
+            return None;
+        }
+        Some(r)
+    };
+    let mut r = r?;
+    let last = *r.last().unwrap();
+    r.extend_from_slice(&s_suffix(last));
+    Some(r)
+}
+
 const ISE_SUF: [(&[u8], usize); 9] = [
     (b"isations", 9),
     (b"isation", 8),
@@ -367,7 +593,7 @@ fn lts_f(lex: &Lexicon, w: &[u8], fl: &mut u8) -> Option<Vec<u8>> {
 
 /// `FUN_1000a140` with its flag side effect.
 fn a140(lex: &Lexicon, w: &[u8], fl: &mut u8) -> Option<Vec<u8>> {
-    let r = suffix_strip(lex, w)?;
+    let r = if lex.era.is_2009() { suffix_strip09(lex, w)? } else { suffix_strip(lex, w)? };
     *fl |= 8;
     Some(r)
 }
@@ -499,7 +725,8 @@ fn clitic_same_token(lex: &Lexicon, ws: &mut Ws, idx: usize) -> bool {
         let prev_sp = m_spelling(ws, idx - 1);
         let subj = super::tagger::in_list(super::tables::L_SUBJPRON.as_slice(), &prev_sp)
             || super::tagger::in_list(super::tables::L_WH.as_slice(), &prev_sp);
-        if subj {
+        // julie09 has no "had / would" split: a clitic 'd always reads as D.
+        if subj || lex.era.is_2009() {
             if v_or_r { vec![0x15] } else { vec![7, 0x15] }
         } else {
             ed_suffix(last as u8)
@@ -849,6 +1076,9 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
     }
     let (b40, b20, b10) = (src.b40, src.b20, src.b10);
     let len = sp.len();
+    // julie09 FUN_10008330: the length thresholds are 3 / 5 / 4 where 2014 has 2 / 2 / 3.
+    let e09 = lex.era.is_2009();
+    let p09 = lex.era == crate::era::Era::Paul09;
     let (prev, pc, next, nc) = caps_neighbours(ws, idx);
     if class == b'A' {
         let caps_ctx = match (&prev, &next) {
@@ -858,6 +1088,10 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
             (Some(_), Some(_)) => pc && nc,
         };
         if !caps_ctx {
+            // paul09 `FUN_100085f0`: no "Lexus IS" special case and no no-spell list.
+            if p09 {
+                return true;
+            }
             if prev.as_deref().is_some_and(|p| stricmp(p, b"Lexus") == 0) && sp == b"IS" {
                 return true;
             }
@@ -868,7 +1102,7 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
         if !src.has_pron && !src.b80 {
             return false;
         }
-        if len > 2 {
+        if len > if e09 { 3 } else { 2 } {
             return false;
         }
         return !super::lts::lts_valid(lex, sp);
@@ -879,7 +1113,7 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
     if vowel_count(sp) == 0 {
         return true;
     }
-    if len > 2 && super::lts::lts_valid(lex, sp) {
+    if len > if e09 { 5 } else { 2 } && super::lts::lts_valid(lex, sp) {
         return false;
     }
     if b40 || b20 {
@@ -891,13 +1125,13 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
         (Some(_), None) => pc,
         (Some(_), Some(_)) => pc && nc,
     };
-    if !caps_ctx && !nospell(sp) {
+    if !caps_ctx && (p09 || !nospell(sp)) {
         return true;
     }
     if b10 {
         return false;
     }
-    if len < 3 {
+    if len < if e09 { 4 } else { 3 } {
         return true;
     }
     !super::lts::lts_valid(lex, sp)
@@ -954,7 +1188,10 @@ fn letters_only(w: &[u8]) -> bool {
 /// letter, and ends the part (without consuming) at a bare `'` that follows
 /// an `s` when the next letter is Upper (`Jones'Store` -> `Jones`|`Store`,
 /// keeping the apostrophe out of both parts).
-fn split_camel_part(word: &[u8], pos: &mut usize) -> Vec<u8> {
+fn split_camel_part(era: crate::era::Era, word: &[u8], pos: &mut usize) -> Vec<u8> {
+    if era.is_2009() {
+        return split_camel_part09(word, pos);
+    }
     let n = word.len();
     let mut out: Vec<u8> = Vec::new();
     let mut i = *pos;
@@ -993,6 +1230,56 @@ fn split_camel_part(word: &[u8], pos: &mut usize) -> Vec<u8> {
     }
 }
 
+/// julie09 `FUN_1000c350`: a part ends before any non-lowercase character that follows a lowercase one
+/// (state 'L'); after an uppercase character (state 'U') the next character always joins. `'s` before an
+/// uppercase letter joins the part, a bare `'` after an `s` is skipped.
+fn split_camel_part09(word: &[u8], pos: &mut usize) -> Vec<u8> {
+    let n = word.len();
+    let at = |i: usize| word.get(i).copied().unwrap_or(0);
+    let c0 = at(*pos);
+    let mut out = vec![c0];
+    let mut upper = sc(&CHAR_CLASS, c0) & 0x80 != 0;
+    *pos += 1;
+    if n < *pos {
+        return out;
+    }
+    loop {
+        let i = *pos;
+        let c = at(i);
+        if c == 0 {
+            return out;
+        }
+        if upper {
+            out.push(c);
+            upper = sc(&CHAR_CLASS, c) & 0x80 != 0;
+            *pos += 1;
+        } else if sc(&CHAR_CLASS, c) & 0x40 == 0 {
+            if c != b'\'' {
+                return out;
+            }
+            if i + 2 < n && at(i + 1) == b's' && sc(&CHAR_CLASS, at(i + 2)) & 0x80 != 0 {
+                out.push(c);
+                out.push(at(i + 1));
+                *pos += 2;
+                return out;
+            }
+            if i > 0 && i + 1 < n && at(i - 1) == b's' && sc(&CHAR_CLASS, at(i + 1)) & 0x80 != 0 {
+                *pos += 1;
+                return out;
+            }
+            // The engine loops here without consuming; keep the apostrophe so the caller terminates.
+            out.push(c);
+            *pos += 1;
+        } else {
+            out.push(c);
+            *pos += 1;
+        }
+        if n < *pos {
+            return out;
+        }
+    }
+}
+
 /// `FUN_1000c3a0`: camelCase split. Each part (`FUN_1000c860`) takes the
 /// lexicon pron (2+ letters), LTS when the entry asks for it, spelling when
 /// `FUN_100086c0(.., entry, 1)` says so ("NWS" in "NWSOmaha"), the suffix
@@ -1017,7 +1304,7 @@ fn camelcase_split(lex: &Lexicon, ws: &Ws, idx: usize, word: &[u8], fl: &mut u8)
     let mut parts = 0usize;
     let mut resolved = false;
     loop {
-        let part = split_camel_part(word, &mut pos);
+        let part = split_camel_part(lex.era, word, &mut pos);
         if parts == 0 && pos == n {
             break;
         }
@@ -1374,7 +1661,7 @@ pub fn morphology(ws: &mut Ws, wa: &Wa, lex: &Lexicon) {
 
         // The driver's skip exits jump straight to the loop increment.
         if !skip_rest {
-            post_rules(ws, wa, i);
+            post_rules(ws, wa, i, lex.era.is_2009());
         }
         i += 1;
     }
@@ -1389,6 +1676,9 @@ pub fn morphology(ws: &mut Ws, wa: &Wa, lex: &Lexicon) {
         }
         let sp_prev = m_spelling(ws, i - 1);
         if (stricmp(&sp_prev, b"the") == 0 || stricmp(&sp_prev, b"de") == 0) && p0 != 0x43 {
+            if lex.era == crate::era::Era::Paul09 {
+                ws.set_u8(m(i - 1) + mr::PRON, 0x16);
+            }
             ws.set_u8(m(i - 1) + mr::PRON + 1, 0x26);
             ws.set_u8(m(i - 1) + mr::PRON + 2, 0);
             m_flags_or(ws, i - 1, 8);
@@ -1612,24 +1902,96 @@ fn a_rule(ws: &mut Ws, i: usize, sp: &[u8]) {
     m_flags_or(ws, i, 8);
 }
 
+/// julie09 `FUN_100070d0` 'read' rule: only the previous morph is looked at (no `p-2` / "not" lookback).
+/// Returns true when the rule applied or was skipped by the engine's jump past the minute / close block.
+fn read_rule09(ws: &mut Ws, i: usize) -> bool {
+    use super::tables::{L_BE, L_HAVE, L_OBJPRON, L_TIME, L_WH};
+    if stricmp(&m_spelling(ws, i), b"read") != 0 || m_pron(ws, i).get(1) != Some(&0x27) {
+        return false;
+    }
+    if i == 0 {
+        return true;
+    }
+    let sp = |k: usize| m_spelling(ws, k);
+    let prev = sp(i - 1);
+    let set = if bsearch_ci(&L_BE, &prev) >= 0
+        || bsearch_ci(&L_HAVE, &prev) >= 0
+        || stricmp(&prev, b"he") == 0
+        || stricmp(&prev, b"she") == 0
+    {
+        true
+    } else {
+        let n = ws.n_morphs();
+        if (stricmp(b"i", &prev) != 0 && bsearch_ci(&L_OBJPRON, &prev) < 0)
+            || morph_list_window(ws, i, n, b'B', 0x14, &L_TIME) < 0
+        {
+            let ggg = |k: usize| matches!(sp(k).as_slice(), b"get" | b"got" | b"gets");
+            let skip = bsearch_ci(&L_WH, &prev) < 0
+                && (((i < 3 || !ggg(i - 3)) && (i < 2 || !ggg(i - 2))) || stricmp(&prev, b"to") == 0);
+            !skip
+        } else {
+            true
+        }
+    };
+    if set {
+        ws.set_u8(m(i) + mr::PRON + 1, 0x18);
+        m_flags_or(ws, i, 8);
+    }
+    true
+}
+
 /// `LAB_1000792a` onward: post-rules run on every morph after the main
 /// dispatch, regardless of how the pron was produced.
-fn post_rules(ws: &mut Ws, wa: &Wa, i: usize) {
+fn post_rules(ws: &mut Ws, wa: &Wa, i: usize, e09: bool) {
     use super::tables::{L_BOW, L_LEAD};
     let sp = m_spelling(ws, i);
     let tok = ws.i16(m(i) + mr::TOKEN) as usize;
     if stricmp(&sp, b"a") == 0 && wa.u8(Wa::rec(tok) + war::CASE_MODE) != b'S' {
         a_rule(ws, i, &sp);
     }
-    read_rule(ws, i);
-    if stricmp(&sp, b"use") == 0 || stricmp(&sp, b"close") == 0 {
-        let off = if stricmp(&sp, b"use") == 0 { mr::PRON + 2 } else { mr::PRON + 3 };
-        if ws.u8(m(i) + off) == 0x37 && verb_context(ws, i) {
-            ws.set_u8(m(i) + off, 0x44);
+    if e09 {
+        let n = ws.n_morphs();
+        if i + 1 < n && stricmp(&m_spelling(ws, i + 1), b"to") == 0 {
+            if stricmp(&sp, b"used") == 0 {
+                m_set_pron(ws, i, &[0x43, 0x3f, 0x37, 0x39]);
+                m_flags_or(ws, i, 8);
+            } else if stricmp(&sp, b"unused") == 0 {
+                m_set_pron(ws, i, &[9, 0x2d, 0x43, 0x3f, 0x37, 0x39]);
+                m_flags_or(ws, i, 8);
+            }
+        }
+        if stricmp(&sp, b"use") == 0 && ws.u8(m(i) + mr::PRON + 2) == 0x37 && verb_context(ws, i) {
+            ws.set_u8(m(i) + mr::PRON + 2, 0x44);
             m_flags_or(ws, i, 8);
         }
+        if i + 1 < n && sp.as_slice() == b"UP" {
+            let nx = m_spelling(ws, i + 1);
+            if stricmp(&nx, b"a") == 0 || stricmp(&nx, b"the") == 0 {
+                m_set_pron(ws, i, &[8, 0x35]);
+                m_flags_or(ws, i, 8);
+            }
+        }
+        if !read_rule09(ws, i) && i > 0 {
+            if i > 0 && is_numword(&m_spelling(ws, i - 1)) && stricmp(&sp, b"minute") == 0 {
+                m_set_pron(ws, i, &[0x2c, 0x24, 0x2d, 0x23, 0x39]);
+                m_flags_or(ws, i, 8);
+            }
+            if stricmp(&sp, b"close") == 0 && ws.u8(m(i) + mr::PRON + 3) == 0x37 && verb_context(ws, i) {
+                ws.set_u8(m(i) + mr::PRON + 3, 0x44);
+                m_flags_or(ws, i, 8);
+            }
+        }
+    } else {
+        read_rule(ws, i);
+        if stricmp(&sp, b"use") == 0 || stricmp(&sp, b"close") == 0 {
+            let off = if stricmp(&sp, b"use") == 0 { mr::PRON + 2 } else { mr::PRON + 3 };
+            if ws.u8(m(i) + off) == 0x37 && verb_context(ws, i) {
+                ws.set_u8(m(i) + off, 0x44);
+                m_flags_or(ws, i, 8);
+            }
+        }
     }
-    if i > 0 && is_numword(&m_spelling(ws, i - 1)) && stricmp(&sp, b"minute") == 0 {
+    if !e09 && i > 0 && is_numword(&m_spelling(ws, i - 1)) && stricmp(&sp, b"minute") == 0 {
         let mut p = [0u8; 5];
         p.copy_from_slice(&[0x2c, 0x24, 0x2d, 0x23, 0x39]);
         m_set_pron(ws, i, &p);

@@ -292,7 +292,8 @@ pub fn city(fe: &Fe, wa: &mut Wa, t: &[u8], p: usize, off: i32, flag: bool) -> i
                 return 0;
             }
             let r = wa.n() as i32 - 1;
-            wa.set_i16(Wa::rec(r) + 0x1e, 0x1f);
+            // paul09 FUN_10031790 stores 0x1e (julie09 FUN_100315c0 and 2014 0x1f).
+            wa.set_i16(Wa::rec(r) + 0x1e, if era() == crate::era::Era::Paul09 { 0x1e } else { 0x1f });
         }
         if n == 1 && last.comma == 0 {
             return consumed;

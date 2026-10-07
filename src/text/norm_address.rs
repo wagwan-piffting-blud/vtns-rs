@@ -149,7 +149,8 @@ fn po_box(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> 
         // "P.O.B" / "POB" exact, optional trailing "."
         let (w1, r1) = tk(fe, t, p + r0 as usize, off + r0, 0x15);
         let extra = if w1.udict == 0 && w1.ws == 0 && dotlike(&w1) { r1 } else { 0 };
-        text = s(0x10080020); // "P.O Box"
+        // paul09 FUN_10030ee0 speaks "P.O.B" as is.
+        text = if fe.era == crate::era::Era::Paul09 { s(0x10080034) } else { s(0x10080020) };
         consumed = r0 + extra;
         return finish(fe, wa, t, p, off, text, start, w0.end, consumed);
     } else if stricmp(&w0.text, s(0x1008002c)) == 0 {

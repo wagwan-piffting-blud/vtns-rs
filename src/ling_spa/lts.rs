@@ -163,7 +163,7 @@ impl Work {
 
 /// `FUN_10022810(work, word, len, w_foreign)`. `None` for an empty word (the
 /// engine's -1).
-pub fn stage1(word: &[u8], len: i32, w_foreign: bool) -> Option<Work> {
+pub fn stage1(word: &[u8], len: i32, w_foreign: bool, era09: bool) -> Option<Work> {
     let mut w = Work::new();
     w.set_i16(W_NSYL, 1);
     if word.first().copied().unwrap_or(0) == 0 {
@@ -184,7 +184,7 @@ pub fn stage1(word: &[u8], len: i32, w_foreign: bool) -> Option<Work> {
         let mut i = 0i32;
         loop {
             let b = at(&w98, i);
-            if b == at(&w98, i + 1) && matches!(b, b'm' | b's' | b't' | b'b' | b'd' | b'f' | b'g' | b'k' | b'p') {
+            if b == at(&w98, i + 1) && (matches!(b, b'm' | b's' | b't') || (!era09 && matches!(b, b'b' | b'd' | b'f' | b'g' | b'k' | b'p'))) {
                 i += 1;
             }
             w1.push(b);
@@ -230,9 +230,9 @@ pub fn stage1(word: &[u8], len: i32, w_foreign: bool) -> Option<Work> {
         } else if i + 1 < n
             && ((strong(b0) && weak(b1))
                 || (weak(b0) && strong(b1))
-                || (b0 == b'i' && b1 == 0xfa)
-                || (b0 == b'u' && b1 == 0xed)
-                || (b0 == 0xfc && b1 == 0xed)
+                || (!era09 && b0 == b'i' && b1 == 0xfa)
+                || (!era09 && b0 == b'u' && b1 == 0xed)
+                || (!era09 && b0 == 0xfc && b1 == 0xed)
                 || (b0 == b'i' && b1 == b'u')
                 || (b0 == b'u' && b1 == b'i')
                 || (b0 == 0xfc && b1 == b'i'))
@@ -280,7 +280,8 @@ pub fn stage1(word: &[u8], len: i32, w_foreign: bool) -> Option<Work> {
         } else if i + 1 < n
             && ((matches!(b0, b'b' | b'c' | b'f' | b'g' | b'p') && matches!(b1, b'l' | b'r'))
                 || (matches!(b0, b'd' | b't') && b1 == b'r')
-                || matches!((b0, b1), (b'c', b'h') | (b'l', b'l') | (b'r', b'r') | (b'g', b'u') | (b'z', b'z') | (b't', b'x') | (b'q', b'u')))
+                || matches!((b0, b1), (b'c', b'h') | (b'l', b'l') | (b'r', b'r') | (b'g', b'u') | (b'q', b'u'))
+                || (!era09 && matches!((b0, b1), (b'z', b'z') | (b't', b'x'))))
         {
             if matches!(b0, b'g' | b'q') && b1 == b'u' && (next >= n || !matches!(b2, b'e' | 0xe9 | b'i' | 0xed)) {
                 pat.push(cons.wrapping_add(b'1'));
@@ -453,7 +454,10 @@ pub fn stage1(word: &[u8], len: i32, w_foreign: bool) -> Option<Work> {
 
 /// `FUN_10023930(work, mnemonic, mexican, w_foreign)`: writes the phone string
 /// into `work` (`Work::phones`). `None` on a letter/pattern it has no rule for.
-pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool) -> Option<()> {
+pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool, era09: bool) -> Option<()> {
+    // viol09 `FUN_100209b0`: "ll" and a vowel-adjacent "y" are code 0x19, "sh" only opens a word, no "zz"/"tx"
+    // digraphs and no cluster skip flag.
+    let y_code = if era09 { 0x19 } else { 0x3f };
     let len = w.i32(W_LEN);
     let patlen = w.cstr(W_PATTERN).len() as i32;
     let nsyl0 = w.i16(W_NSYL);
@@ -479,10 +483,11 @@ pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool) -> Option<()> {
                 if !vowel_pat(pc) {
                     let c = l(w, i);
                     let nx = l(w, i + 1);
-                    let digraph = !skip
+                    let digraph = (era09 || !skip)
                         && pc == b'B'
                         && i + 1 < len
-                        && matches!((c, nx), (b'c', b'h') | (b'l', b'l') | (b'r', b'r') | (b'g', b'u') | (b'z', b'z') | (b't', b'x') | (b'q', b'u'));
+                        && (matches!((c, nx), (b'c', b'h') | (b'l', b'l') | (b'r', b'r') | (b'g', b'u') | (b'q', b'u'))
+                            || (!era09 && matches!((c, nx), (b'z', b'z') | (b't', b'x'))));
                     if digraph {
                         i += 1;
                         match (c, nx) {
@@ -490,7 +495,7 @@ pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool) -> Option<()> {
                             (b'g', b'u') => out.push(0x15),
                             (b'l', b'l') => {
                                 if p + 1 < patlen && vowel_pat(w.pat(p + 1)) {
-                                    out.push(0x3f);
+                                    out.push(y_code);
                                 } else {
                                     out.extend_from_slice(&[0x1b, 0x1b]);
                                 }
@@ -564,7 +569,7 @@ pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool) -> Option<()> {
                                 Some(vec![if trill { 0x28 } else { 0x27 }])
                             }
                             b's' => {
-                                if i + 2 <= len && nx == b'h' {
+                                if (if era09 { i == 0 || i + 2 == len } else { i + 2 <= len }) && nx == b'h' {
                                     consume = true;
                                     Some(vec![0x2a])
                                 } else {
@@ -588,7 +593,7 @@ pub fn stage2(w: &mut Work, mexican: bool, w_foreign: bool) -> Option<()> {
                                 } else if i + 1 == len || patlen <= p + 1 || !vowel_pat(w.pat(p + 1)) {
                                     Some(vec![0x17])
                                 } else {
-                                    Some(vec![0x3f])
+                                    Some(vec![y_code])
                                 }
                             }
                             b'z' => Some(vec![0x29]),

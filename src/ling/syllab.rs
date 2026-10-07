@@ -1,28 +1,32 @@
 //! Syllabification: `FUN_10012c70` (per word), `FUN_10013c00` (one boundary
 //! group), `FUN_10013f30` (nucleus / maximal-onset analysis) and
 //! `FUN_10013da0` (onset legality against the cluster list at 0x10079a4c).
+//! 2009: julie09 `FUN_10012750` / `FUN_10013620` / `FUN_10013950` / `FUN_100137c0` (same bodies, own tables,
+//! 0x300-stride words).
 
-use super::tables::{NG_NAME, ONSETS, PHONE_FEAT, PHONE_FEAT_ROW, PH_BASE, PH_STRESS};
-use super::{ptr_ss, sc, syl, wr, Ss, SYL_BASE, SYL_SIZE};
+use super::lay::{Lay, L14};
+use super::phtabs::{PhTabs, T14};
+use super::tables::PHONE_FEAT_ROW;
+use super::{ptr_ss, sc, syl, Ss, SYL_SIZE};
 
 fn feat_row(idx: i32) -> usize {
     // The engine multiplies the low byte (sign-extended) by 11.
     (idx as u8 as i8 as isize * PHONE_FEAT_ROW as isize) as usize
 }
 
-fn is_vowel_idx(idx: i32) -> bool {
-    PHONE_FEAT[feat_row(idx) + 3] == 1
+fn is_vowel_idx(t: &PhTabs, idx: i32) -> bool {
+    t.feat[feat_row(idx) + 3] == 1
 }
 
-fn phone_name(idx: i32) -> &'static [u8] {
+fn phone_name(t: &PhTabs, idx: i32) -> &[u8] {
     let r = feat_row(idx);
-    let s = &PHONE_FEAT[r..r + 3];
+    let s = &t.feat[r..r + 3];
     let n = s.iter().position(|&c| c == 0).unwrap_or(3);
     &s[..n]
 }
 
 /// `FUN_10013da0(arr, from, to)`: is phones[from..=to] (1-based) a legal onset.
-fn legal_onset(arr: &[i32], from: i32, to: i32) -> bool {
+fn legal_onset(t: &PhTabs, arr: &[i32], from: i32, to: i32) -> bool {
     if from < 1 || to < 1 {
         return false;
     }
@@ -32,15 +36,15 @@ fn legal_onset(arr: &[i32], from: i32, to: i32) -> bool {
     }
     if len == 1 {
         let idx = arr[from as usize];
-        return !is_vowel_idx(idx) && phone_name(idx) != NG_NAME;
+        return !is_vowel_idx(t, idx) && phone_name(t, idx) != t.ng;
     }
     let mut s: Vec<u8> = Vec::with_capacity(20);
     for k in from..=to {
-        s.extend_from_slice(phone_name(arr[k as usize]));
+        s.extend_from_slice(phone_name(t, arr[k as usize]));
         s.push(b' ');
     }
     s.pop();
-    ONSETS.iter().any(|&o| o == s.as_slice())
+    t.onsets.iter().any(|&o| o == s.as_slice())
 }
 
 /// Result of `FUN_10013f30` for one group: `(a, b, c, d)` per syllable =
@@ -50,7 +54,7 @@ struct SylPlan {
     syl: Vec<[i32; 4]>,
 }
 
-fn plan(idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
+fn plan(t: &PhTabs, idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
     if n > 0x41 {
         return SylPlan { n: 0, syl: Vec::new() };
     }
@@ -67,7 +71,7 @@ fn plan(idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
     let mut owner = vec![0i32; nu + 2];
     let mut syl: Vec<[i32; 4]> = Vec::new();
     for i in 1..=nu {
-        if is_vowel_idx(ph[i]) && syl.len() < 0x41 {
+        if is_vowel_idx(t, ph[i]) && syl.len() < 0x41 {
             syl.push([i as i32, 0, 0, st[i]]);
             owner[i] = syl.len() as i32;
         }
@@ -79,13 +83,13 @@ fn plan(idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
     for k in 0..ns {
         let last = syl[k][0] - 1;
         let mut j = last;
-        let mut ok = legal_onset(&ph, j, last);
+        let mut ok = legal_onset(t, &ph, j, last);
         while ok {
             j -= 1;
             if k + 1 >= 2 && j <= syl[k - 1][0] {
                 break;
             }
-            ok = legal_onset(&ph, j, last);
+            ok = legal_onset(t, &ph, j, last);
         }
         j += 1;
         if j <= last {
@@ -126,8 +130,8 @@ fn plan(idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
 /// `FUN_10013c00`: syllabify one group of `n` phones into syllable records at
 /// `rec` (first one already has its first-phone byte set). Writes position
 /// codes (1 onset, 2 nucleus, 3 coda) to `pos`. Returns syllables added.
-fn group(ss: &mut Ss, idx: &[u8], stress: &[u8], n: i32, rec: usize, pos: usize) -> i32 {
-    let p = plan(idx, stress, n);
+fn group(t: &PhTabs, ss: &mut Ss, idx: &[u8], stress: &[u8], n: i32, rec: usize, pos: usize) -> i32 {
+    let p = plan(t, idx, stress, n);
     let mut ns = p.n;
     if ns > 0x41 {
         ns = 0x41;
@@ -188,38 +192,42 @@ fn group(ss: &mut Ss, idx: &[u8], stress: &[u8], n: i32, rec: usize, pos: usize)
 
 /// `FUN_10012c70`: syllabify every word of the sentence.
 pub fn syllabify(ss: &mut Ss) {
+    syllabify_lay(&L14, &T14, ss)
+}
+
+pub fn syllabify_lay(lay: &Lay, t: &PhTabs, ss: &mut Ss) {
     ss.set_i16(4, 0);
     let nw = ss.n_words();
     for i in 0..nw {
-        let w = Ss::word(i);
-        let n = ss.u8(w + wr::N_PHONES) as usize;
-        let base = SYL_BASE + ss.i16(4) as usize * SYL_SIZE;
-        ss.set_u32(w + wr::SYL_PTR, ptr_ss(base));
+        let w = lay.word(i);
+        let n = ss.u8(w + lay.n_phones) as usize;
+        let base = lay.syl_base + ss.i16(4) as usize * SYL_SIZE;
+        ss.set_u32(w + lay.syl_ptr, ptr_ss(base));
         let mut idx = [0u8; 68];
         let mut st = [0u8; 68];
         for k in 0..n.min(68) {
-            let c = ss.u8(w + wr::CODES + k);
-            idx[k] = sc(&PH_BASE, c);
-            st[k] = sc(&PH_STRESS, c);
+            let c = ss.u8(w + lay.codes + k);
+            idx[k] = sc(t.base, c);
+            st[k] = sc(t.stress, c);
         }
-        ss.set_u8(w + wr::N_SYL, 0);
+        ss.set_u8(w + lay.n_syl, 0);
         let mut gs: i16 = 0;
         let mut k: i16 = 0;
         while (k as i32) < n as i32 {
-            if ss.u8(w + wr::MARKS + k as usize) != b'0' || k as usize == n - 1 {
-                let nsyl = ss.u8(w + wr::N_SYL) as usize;
+            if ss.u8(w + lay.marks + k as usize) != b'0' || k as usize == n - 1 {
+                let nsyl = ss.u8(w + lay.n_syl) as usize;
                 let rec = base + nsyl * SYL_SIZE;
                 ss.set_u8(rec + syl::FIRST_PHONE, gs as u8);
                 let g = gs as usize;
                 let cnt = (k - gs + 1) as i32;
-                let added = group(ss, &idx[g.min(68)..], &st[g.min(68)..], cnt, rec, w + wr::SYLPOS + g);
-                let v = ss.u8(w + wr::N_SYL).wrapping_add(added as u8);
-                ss.set_u8(w + wr::N_SYL, v);
+                let added = group(t, ss, &idx[g.min(68)..], &st[g.min(68)..], cnt, rec, w + lay.sylpos + g);
+                let v = ss.u8(w + lay.n_syl).wrapping_add(added as u8);
+                ss.set_u8(w + lay.n_syl, v);
                 gs = k + 1;
             }
             k += 1;
         }
-        let t = ss.i16(4).wrapping_add(ss.u8(w + wr::N_SYL) as i16);
+        let t = ss.i16(4).wrapping_add(ss.u8(w + lay.n_syl) as i16);
         ss.set_i16(4, t);
     }
 }

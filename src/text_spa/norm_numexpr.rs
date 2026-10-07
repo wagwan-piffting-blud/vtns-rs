@@ -11,19 +11,16 @@
 //! are the engine's `local_400`/`local_3bc`/`local_140`/`local_180`/
 //! `local_37c`/`local_2fc` token buffers.
 //!
-//! `/` (`FUN_10034270`'s third arm) reads a preceding/following abbreviation
-//! or unit name as "por" via `abbrev::unit_word` (`FUN_10033990`, the one
-//! table of the four the engine tries that turned out to be fully static);
-//! the other three (`FUN_100338b0` over `DAT_10082060`/`64`/`68`) are
-//! runtime-only tables `abbrev.rs` could not recover, so a `/` whose
-//! resolution depends on exactly one of *those* three still falls back to
-//! the engine's own "barra" default instead of matching -- see `abbrev.rs`.
+//! `/` (`FUN_10034270`'s third arm) reads a unit after a number ("5/hora")
+//! as "por hora", and a slash after a unit word as "por", looking units up
+//! in the three `FUN_100338b0` groups, then `FUN_10033990`.
 
 use super::abbrev;
 use super::emit::emit_split;
 use super::numwords::{append_word, is_comma_grouped, is_period_grouped, strip_digits};
 use super::tokenize::{tokenize, Tok};
 use super::{rec, FeSpa};
+use crate::ling_spa::lexicon::stricmp_spa;
 use crate::ling_spa::WaSpa;
 
 const SRC: u32 = 0x12;
@@ -238,9 +235,9 @@ fn rec_check2(wa: &mut WaSpa, cur: &Tok, prev: &Tok, tok_n: &Tok) {
 /// The nesting (verified against the decompile's own indentation, not just
 /// its brace count) is `if COND_405 { if COND_410_417 { if COND_418 { if
 /// COND_422 {"gui\xf3n"} else {rec_check2} } else {"menos"} } else
-/// {"menos"} } else {"menos"}` -- every failing gate falls back to
-/// "menos", and only the deepest, narrowest gate (COND_422) can produce
-/// "gui\xf3n" or silence.
+/// {"menos"} } else {"gui\xf3n"}`: a failing COND_405 (a unit word
+/// right before) falls out to "gui\xf3n", the inner gates to "menos", and
+/// COND_422 gives "gui\xf3n" or silence.
 fn minus_word_num(wa: &mut WaSpa, cur: &Tok, prev_prev: &Tok, prev: &Tok, tok_n: &Tok) -> Vec<u8> {
     // Lines 400-403: an unconditional shortcut ahead of COND_405.
     if cur.ws > 0 && grouped(tok_n.text()) && tok_n.ws == 0 {
@@ -253,8 +250,9 @@ fn minus_word_num(wa: &mut WaSpa, cur: &Tok, prev_prev: &Tok, prev: &Tok, tok_n:
     let src_is_10 = n > 0 && wa.i32(WaSpa::rec(n as usize - 1) + rec::SRC) == 10;
     let cond_405 =
         !(end_matches && src_is_10 && cur.ws <= 2 && grouped(tok_n.text()) && tok_n.ws <= 2);
+    // A unit word (src 10) right before: falls out to `DAT_10067e4c`.
     if !cond_405 {
-        return MENOS.to_vec();
+        return GUION.to_vec();
     }
 
     // COND_410_417 (410-417): the "1E-5" scientific-notation shape.
@@ -464,49 +462,126 @@ fn minus_num_num(
         .unwrap_or_else(|| GUION.to_vec())
 }
 
+/// viol09 `FUN_100310a0`, `tokP.class == 2` arm. `tokN.class != 2` takes the
+/// same rec-check as 2014; a non-grouped number is silent (2014: "gui\xf3n"),
+/// the digit logic is shorter, and the "a" word only follows a literal "por".
+fn minus_num_num09(
+    wa: &mut WaSpa, cur: &Tok, prev_prev: &Tok, prev: &Tok, tok_n: &Tok,
+    t: &[u8], pos_after_n: usize, off_after_n: i32,
+) -> Vec<u8> {
+    if tok_n.class != 2 {
+        rec_check(wa, cur, prev, tok_n);
+        return Vec::new();
+    }
+    if !grouped(prev.text()) || !grouped(tok_n.text()) {
+        return Vec::new();
+    }
+    let (tok2, r2) = tokenize(t, pos_after_n, off_after_n, 0);
+    let go_c24 = if tok2.len == 1 {
+        if in_set(XX_SET, c0(&tok2)) && cur.ws == tok_n.ws && cur.ws == tok2.ws && tok2.ws < 2 {
+            return MENOS.to_vec();
+        }
+        if tok2.class == 6 && cur.ws == tok_n.ws && tok2.ws < 2 && is_fraction_key(c0(&tok2)) {
+            return MENOS.to_vec();
+        }
+        true
+    } else {
+        tok2.len > 0
+    };
+    if go_c24 && grouped(tok2.text()) && cur.ws == tok_n.ws && tok2.ws <= 1 {
+        let pos2 = pos_after_n + r2 as usize;
+        let off2 = off_after_n + r2;
+        let (tok_n3, r3) = tokenize(t, pos2, off2, 0);
+        if tok_n3.len == 1 && c0(&tok_n3) == b'/' && tok_n3.ws == 0 {
+            let (tok_n4, _) = tokenize(t, pos2 + r3 as usize, off2 + r3, 0);
+            if tok_n4.len > 0 && grouped(tok_n4.text()) && tok_n4.ws == 0 {
+                return MENOS.to_vec();
+            }
+        }
+        return GUION.to_vec();
+    }
+    if prev_prev.len == 1 {
+        if c0(prev_prev) != 0
+            && in_set(XX_SET, c0(prev_prev))
+            && cur.ws == prev.ws
+            && cur.ws == tok_n.ws
+            && cur.ws < 2
+            && tok2.len > 0
+            && tok2.class != 2
+        {
+            return MENOS.to_vec();
+        }
+    } else if prev_prev.len < 1 {
+        return GUION.to_vec();
+    }
+    if stricmp_spa(b"por", prev_prev.text()) != 0 {
+        GUION.to_vec()
+    } else {
+        A_WORD.to_vec()
+    }
+}
+
 /// The `/` dispatch (lines 84-153). `None` means the trivial early return
 /// (line 128-131: a bare word/word split with nothing glued, silently
 /// consumed); `Some` is always a non-empty word ("barra" folded in as the
 /// shared default when neither abbreviation check fires).
-fn slash(wa: &WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32) -> Option<Vec<u8>> {
+fn slash(wa: &WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32) -> Option<(Vec<u8>, i32)> {
     let (grabbed, back) = prev_words(t, p - off as usize, p, 1);
     let prev = if back != 0 { last_two_tokens(&grabbed, off - back).1 } else { Tok::default() };
 
-    let (tok_n, r_n) = tokenize(t, p + cur.consumed as usize, off + cur.consumed, 0);
-    let pos_after_n = p + cur.consumed as usize + r_n as usize;
-    let off_after_n = off + cur.consumed + r_n;
+    let pos_n = p + cur.consumed as usize;
+    let off_n = off + cur.consumed;
+    let (tok_n, r_n) = tokenize(t, pos_n, off_n, 0);
+    let pos_after_n = pos_n + r_n as usize;
+    let off_after_n = off_n + r_n;
 
-    if prev.len >= 1 && prev.class == 1 && cur.ws == 0 && tok_n.class == 1 && tok_n.ws == 0 {
-        return None;
-    }
-
-    let mut word = Vec::new();
-    if prev.len < 1 {
-        let n = wa.i16(0);
-        let gate = n > 0
-            && wa.i32(WaSpa::rec(n as usize - 1) + rec::END) == cur.start
-            && wa.i32(WaSpa::rec(n as usize - 1) + rec::SRC) == 10
-            && cur.ws == 0
-            && tok_n.len > 0
-            && tok_n.ws == 0
-            && grouped(tok_n.text());
-        if gate {
-            let (tok2, _) = tokenize(t, pos_after_n, off_after_n, 0);
-            if tok2.len > 0 && abbrev::unit_word(tok2.text()).is_some() {
-                word = b"por".to_vec();
+    if prev.len >= 1 {
+        if prev.class == 1 && cur.ws == 0 && tok_n.class == 1 && tok_n.ws == 0 {
+            return None;
+        }
+        // "5/hora": "por hora", the unit consumed with the slash.
+        if prev.class == 2 && cur.ws <= 1 && tok_n.class == 1 && tok_n.ws <= 1 {
+            let mut name = Vec::new();
+            let mut cursor = tok_n.consumed;
+            if unit_name(&mut name, tok_n.text(), t, pos_n, off_n, &mut cursor) {
+                let mut word = b"por ".to_vec();
+                word.extend_from_slice(&name);
+                return Some((word, r_n));
             }
-        }
-    } else if prev.class == 2 && cur.ws <= 1 && tok_n.class == 1 && tok_n.ws <= 1 {
-        if let Some(rendered) = abbrev::unit_word(tok_n.text()) {
-            word = b"por ".to_vec();
-            word.extend_from_slice(&rendered);
+            return Some((GUION_BARRA.to_vec(), 0));
         }
     }
-    Some(if word.is_empty() { GUION_BARRA.to_vec() } else { word })
+    let n = wa.i16(0);
+    let gate = n > 0
+        && wa.i32(WaSpa::rec(n as usize - 1) + rec::END) == cur.start
+        && wa.i32(WaSpa::rec(n as usize - 1) + rec::SRC) == 10
+        && cur.ws == 0
+        && tok_n.len > 0
+        && tok_n.ws == 0
+        && grouped(tok_n.text());
+    if gate {
+        let (tok2, _) = tokenize(t, pos_after_n, off_after_n, 0);
+        let mut name = Vec::new();
+        let mut cursor = tok2.consumed;
+        if tok2.len > 0 && unit_name(&mut name, tok2.text(), t, pos_after_n, off_after_n, &mut cursor) {
+            return Some((b"por".to_vec(), 0));
+        }
+    }
+    Some((GUION_BARRA.to_vec(), 0))
+}
+
+/// `FUN_100338b0` over the three groups (singular), then `FUN_10033990`.
+fn unit_name(out: &mut Vec<u8>, word: &[u8], t: &[u8], pos: usize, off: i32, cursor: &mut i32) -> bool {
+    for g in 0..3 {
+        if abbrev::group_lookup(g, Some(&mut *out), word, 0, None) {
+            return true;
+        }
+    }
+    abbrev::unit_lookup(Some(out), word, t, pos, off, cursor, None)
 }
 
 /// The `-` dispatch (lines 154-480 minus the leading class check).
-fn minus(wa: &mut WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32) -> Option<Vec<u8>> {
+fn minus(wa: &mut WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32, era09: bool) -> Option<Vec<u8>> {
     let (grabbed, back) = prev_words(t, p - off as usize, p, 2);
     let (prev_prev, prev) = if back != 0 {
         last_two_tokens(&grabbed, off - back)
@@ -534,6 +609,8 @@ fn minus(wa: &mut WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32) -> Option<Vec<
         } else {
             Vec::new()
         }
+    } else if prev.class == 2 && era09 {
+        minus_num_num09(wa, cur, &prev_prev, &prev, &tok_n, t, pos_after_n, off_after_n)
     } else if prev.class == 2 {
         minus_num_num(wa, cur, &prev_prev, &prev, &tok_n, t, pos_after_n, off_after_n)
     } else {
@@ -543,7 +620,7 @@ fn minus(wa: &mut WaSpa, cur: &Tok, t: &[u8], p: usize, off: i32) -> Option<Vec<
     Some(word)
 }
 
-pub fn numexpr(_fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
+pub fn numexpr(fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
     let cur = tok.clone();
     let is_op = cur.len == 1 && cur.class == 3;
     let ch = c0(&cur);
@@ -561,11 +638,14 @@ pub fn numexpr(_fe: &FeSpa, wa: &mut WaSpa, tok: &mut Tok, t: &[u8], p: usize, o
         w
     } else if is_op && ch == b'/' {
         match slash(wa, &cur, t, p, off) {
-            Some(w) => w,
+            Some((w, extra)) => {
+                consumed += extra;
+                w
+            }
             None => return consumed,
         }
     } else if is_op && ch == b'-' {
-        match minus(wa, &cur, t, p, off) {
+        match minus(wa, &cur, t, p, off, fe.era.is_2009()) {
             Some(w) => w,
             None => return -1,
         }

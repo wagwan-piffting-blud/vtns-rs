@@ -13,6 +13,7 @@ pub mod breaks;
 pub mod context;
 pub mod lexicon;
 pub mod lts;
+pub mod spa09;
 pub mod syllab;
 pub mod words;
 

@@ -1,10 +1,12 @@
 //! `FUN_10049c60`: tag-mode continuation. Called by the driver in a loop
-//! while `WA+8` (`TAG_MODE`) is set (a URL path spelled piece by piece after
-//! its own normalizer set the flag; ported with the URL normalizer).
+//! while `WA+8` (`TAG_MODE`) is set, after a URL normalizer spoke a bare
+//! `/`: the rest of the path is spelled (`FUN_10035880`) piece by piece up
+//! to the next bare `/`, which sets the flag again.
 
+use super::spell;
 use super::tables_oth::TAGMODE_PUNCT;
 use super::tokenize::tokenize;
-use super::{emit, FeSpa, TAG_MODE};
+use super::{FeSpa, TAG_MODE};
 use crate::ling_spa::WaSpa;
 
 fn ws(c: u8) -> bool {
@@ -16,76 +18,49 @@ fn in_set(set: &[u8], c: u8) -> bool {
 }
 
 /// `FUN_10049c60(wa, t + base, off)`.
-pub fn tag_mode(_fe: &FeSpa, wa: &mut WaSpa, t: &[u8], base: usize, off: i32) -> i32 {
+pub fn tag_mode(fe: &FeSpa, wa: &mut WaSpa, t: &[u8], base: usize, off: i32) -> i32 {
     if wa.i16(TAG_MODE) == 0 {
         return -1;
     }
     wa.set_i16(TAG_MODE, 0);
-    if *t.get(base).unwrap_or(&0) == 0 {
-        return -1;
-    }
+    let at = |i: usize| *t.get(i).unwrap_or(&0);
+    let mut c = at(base);
     let mut used = 0i32;
-    loop {
-        let c = *t.get(base + used as usize).unwrap_or(&0);
-        if ws(c) || used >= 0x823 {
-            break;
-        }
+    while c != 0 && !ws(c) && used < 0x823 {
         let (tok, r) = tokenize(t, base + used as usize, off + used, 0);
         if r == 0 || tok.ws >= 1 || tok.class == 10 {
             break;
         }
         let text = tok.text().to_vec();
         let c0 = text.first().copied().unwrap_or(0);
-        let mut stop = false;
-        if tok.class == 3 && c0 == b'/' {
+        let spell_it = if tok.class == 3 && c0 == b'/' {
             if tok.len == 1 {
-                if !emit(wa, &text, tok.start, tok.end, b'S', b'D', 1, None) {
+                if spell::expand(fe, wa, &text, tok.start, tok.end, b'D') == 0 {
                     return 0;
                 }
                 wa.set_i16(TAG_MODE, 1);
                 return used + r;
             }
-            if !in_set(TAGMODE_PUNCT, c0) {
-                stop = true;
-            } else if !emit(wa, &text, tok.start, tok.end, b'S', b'D', 1, None) {
-                return 0;
-            }
+            in_set(TAGMODE_PUNCT, c0)
         } else {
-            let after = *t.get(base + used as usize + r as usize).unwrap_or(&0);
+            let after = at(base + (used + r) as usize);
             if c0 == b'.' && (after == 0 || ws(after)) {
-                stop = true;
-            } else {
-                let origin = match tok.class {
-                    1 => Some(b'A'),
-                    2 => Some(b'D'),
-                    3 => {
-                        if c0 == 0 {
-                            stop = true;
-                            None
-                        } else if !in_set(TAGMODE_PUNCT, c0) {
-                            stop = true;
-                            None
-                        } else {
-                            Some(b'S')
-                        }
-                    }
-                    _ => Some(b'S'),
-                };
-                if let Some(origin) = origin {
-                    if !emit(wa, &text, tok.start, tok.end, origin, b'D', 1, None) {
-                        return 0;
-                    }
-                }
+                break;
             }
-        }
-        if stop {
+            match tok.class {
+                1 | 2 => true,
+                3 => in_set(TAGMODE_PUNCT, c0),
+                _ => true,
+            }
+        };
+        if !spell_it {
             break;
         }
-        let next = *t.get(base + used as usize + r as usize).unwrap_or(&0);
+        if spell::expand(fe, wa, &text, tok.start, tok.end, b'D') == 0 {
+            return 0;
+        }
+        c = at(base + (used + r) as usize);
         used += r;
-        if next == 0 {
-            break;
-        }
     }
     if used != 0 {
         used

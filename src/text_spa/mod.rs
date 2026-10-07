@@ -13,6 +13,7 @@ pub mod norm_math;
 pub mod norm_number;
 pub mod norm_numexpr;
 pub mod norm_phone;
+pub mod norm_phone09;
 pub mod norm_roman;
 pub mod norm_symbols;
 pub mod norm_symbols2;
@@ -34,6 +35,7 @@ pub mod word;
 use std::io;
 use std::path::Path;
 
+use crate::era::Era;
 use crate::ling_spa::lexicon::LexiconSpa;
 use crate::ling_spa::WaSpa;
 use userdict_spa::UserDictSpa;
@@ -42,17 +44,22 @@ use userdict_spa::UserDictSpa;
 pub struct FeSpa {
     pub lex: LexiconSpa,
     pub userdict: Option<UserDictSpa>,
+    pub era: Era,
 }
 
 impl FeSpa {
     pub fn load(dict_spa: &Path) -> io::Result<FeSpa> {
-        let lex = LexiconSpa::open(dict_spa)?;
+        FeSpa::load_era(dict_spa, Era::V2014)
+    }
+
+    pub fn load_era(dict_spa: &Path, era: Era) -> io::Result<FeSpa> {
+        let lex = LexiconSpa::open_era(dict_spa, era)?;
         // `data-common/userdict/userdict_spa.csv`, a sibling of `dict-spa`.
         let userdict = dict_spa
             .parent()
             .and_then(|common| std::fs::read(common.join("userdict").join("userdict_spa.csv")).ok())
             .and_then(|b| UserDictSpa::load(&b));
-        Ok(FeSpa { lex, userdict })
+        Ok(FeSpa { lex, userdict, era })
     }
 }
 

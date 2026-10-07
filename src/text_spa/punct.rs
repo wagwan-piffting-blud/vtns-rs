@@ -165,20 +165,25 @@ fn rules(prev: &Slot, cur: &Slot, next: &Slot, after: u8) -> u8 {
 /// `FUN_10041dd0(tok, t + p, off)`: is `tok` (at `t[p..]`, sentence start at
 /// `p - off`) a sentence end.
 fn sentence_end(tok: &Tok, t: &[u8], p: usize, off: i32) -> bool {
+    matches!(sentence_end_code(tok, t, p, off), b'P' | b'A')
+}
+
+/// `FUN_10041dd0`'s own return code: 'P', 'N' or 'A'.
+pub(super) fn sentence_end_code(tok: &Tok, t: &[u8], p: usize, off: i32) -> u8 {
     let empty = || Slot { ws: 0, len: 0, class: 0, text: Vec::new() };
     let mut prev = empty();
     let (w, back) = prev_word(t, p - off as usize, p);
     if back != 0 {
         match last_token(&w, 1) {
             Some(pt) => prev = Slot::of(&pt),
-            None => return false,
+            None => return b'N',
         }
     }
     let cur = Slot::of(tok);
     let q = p + tok.consumed as usize;
     let (nt, _) = tokenize(t, q, tok.consumed + off, 1);
     let next = if nt.len > 0 { Slot::of(&nt) } else { empty() };
-    matches!(rules(&prev, &cur, &next, at(t, q as isize)), b'P' | b'A')
+    rules(&prev, &cur, &next, at(t, q as isize))
 }
 
 fn prev_rec(wa: &WaSpa) -> Option<usize> {

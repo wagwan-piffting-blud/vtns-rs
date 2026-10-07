@@ -74,7 +74,8 @@
 //! `SYNCINFO` events all report them), so getting `pos` right matters for
 //! anything consuming those.
 
-use super::{ptr_wa, war, wr, Ss, Wa, SS_TYPE};
+use super::lay::{Lay, L14};
+use super::{ptr_wa, war, Ss, Wa};
 
 /// The bits of per-request text-position state `wr::START`/`wr::END` need:
 /// the running "characters consumed by earlier sentences" cursor, and the
@@ -114,73 +115,100 @@ impl<'a> TextPos<'a> {
 /// sentence is dropped); the SS is left partially filled exactly as the
 /// engine leaves it.
 pub fn build_word_phone_records(ss: &mut Ss, wa: &Wa, kind7: &[i32], pos: &TextPos) -> bool {
+    build_word_phone_records_lay(&L14, ss, wa, kind7, pos)
+}
+
+/// `fe_BuildWordPhoneRecords` for either layout. 2009 (julie09 `FUN_10016690`, paul09 `FUN_10016840`): no
+/// M phone, no domain byte (no kind-7 pass), an empty phone string just leaves `n_phones` 0 and the
+/// function still returns 1, sentence types 4 / 5 / 6.
+pub fn build_word_phone_records_lay(lay: &Lay, ss: &mut Ss, wa: &Wa, kind7: &[i32], pos: &TextPos) -> bool {
     let nw = ss.n_words();
     for i in 0..nw {
         let r = Wa::rec(i);
-        let w = Ss::word(i);
-        ss.set_i32(w + wr::START, pos.start(wa.i32(r + war::START)));
-        ss.set_i32(w + wr::END, pos.end(wa.i32(r + war::END)));
-        ss.set_u32(w + wr::TEXT_PTR, ptr_wa(r + war::TEXT));
-        ss.set_i16(w + wr::X3B4, wa.i16(r + war::NMORPH));
-        ss.set_u32(w + wr::WA_PTR, ptr_wa(r + war::FORCED_POS));
-        ss.set_u32(w + wr::PH_PTR, ptr_wa(r + war::PHONES));
-        ss.set_u8(w + wr::CLASS_CHAR, wa.u8(r + 0x23));
-        ss.set_i16(w + wr::TOKEN_CLASS, wa.i16(r + war::TOKEN_CLASS));
-        ss.set_u8(w + wr::SRC, wa.u8(r + war::SRC));
-        ss.set_u8(w + wr::TAG_A, wa.u8(r + war::TAG_A));
-        ss.set_u8(w + wr::TAG_B, wa.u8(r + war::TAG_B));
-        ss.set_i16(w + wr::X3AE, wa.i16(r + 0x20));
+        let w = lay.word(i);
+        ss.set_i32(w + lay.start, pos.start(wa.i32(r + war::START)));
+        ss.set_i32(w + lay.end, pos.end(wa.i32(r + war::END)));
+        ss.set_u32(w + lay.text_ptr, ptr_wa(r + war::TEXT));
+        ss.set_i16(w + lay.x3b4, wa.i16(r + war::NMORPH));
+        ss.set_u32(w + lay.wa_ptr, ptr_wa(r + war::FORCED_POS));
+        ss.set_u32(w + lay.ph_ptr, ptr_wa(r + war::PHONES));
+        ss.set_u8(w + lay.class_char, wa.u8(r + 0x23));
+        ss.set_i16(w + lay.token_class, wa.i16(r + war::TOKEN_CLASS));
+        ss.set_u8(w + lay.src, wa.u8(r + war::SRC));
+        ss.set_u8(w + lay.tag_a, wa.u8(r + war::TAG_A));
+        ss.set_u8(w + lay.tag_b, wa.u8(r + war::TAG_B));
+        ss.set_i16(w + lay.x3ae, wa.i16(r + 0x20));
 
         let ph = wa.cstr(r + war::PHONES);
         let len = ph.len().min(0x41);
         let mut n = 0usize;
+        if len == 0 && !lay.is09 {
+            return false;
+        }
         for &c in &ph[..len] {
             match c {
                 b'd' => {
                     if n > 0 {
-                        ss.set_u8(w + wr::MARKS + n - 1, b'1');
+                        ss.set_u8(w + lay.marks + n - 1, b'1');
                     }
                 }
                 b'c' => {
                     if n > 0 {
-                        ss.set_u8(w + wr::MARKS + n - 1, b'2');
+                        ss.set_u8(w + lay.marks + n - 1, b'2');
                     }
                 }
                 _ => {
-                    ss.set_u8(w + wr::M_FLAG + n, 0);
-                    if c == b'M' {
-                        ss.set_u8(w + wr::M_FLAG + n, 1);
-                    } else if (c as i8) < 1 || c > b'E' {
+                    if !lay.is09 {
+                        ss.set_u8(w + lay.m_flag + n, 0);
+                        if c == b'M' {
+                            ss.set_u8(w + lay.m_flag + n, 1);
+                            ss.set_u8(w + lay.codes + n, c);
+                            ss.set_u8(w + lay.marks + n, b'0');
+                            n += 1;
+                            continue;
+                        }
+                    }
+                    if (c as i8) < 1 || c > b'E' {
                         break;
                     }
-                    ss.set_u8(w + wr::CODES + n, c);
-                    ss.set_u8(w + wr::MARKS + n, b'0');
+                    ss.set_u8(w + lay.codes + n, c);
+                    ss.set_u8(w + lay.marks + n, b'0');
                     n += 1;
                 }
             }
         }
-        if n == 0 {
+        if n == 0 && !lay.is09 {
             return false;
         }
-        ss.set_u8(w + wr::N_PHONES, n as u8);
+        ss.set_u8(w + lay.n_phones, n as u8);
     }
-    for i in 0..nw {
-        let v = kind7.get(i).copied().unwrap_or(-1);
-        ss.set_u8(Ss::word(i) + wr::DOMAIN, if v == -1 { 0 } else { 0x0c });
+    if !lay.is09 {
+        for i in 0..nw {
+            let v = kind7.get(i).copied().unwrap_or(-1);
+            ss.set_u8(lay.word(i) + lay.domain, if v == -1 { 0 } else { 0x0c });
+        }
     }
     // The engine indexes one record past the last word's base with offset
     // 0x638 == last word + 0x3ac, i.e. the last word's token class.
-    let last = Ss::word(nw) - 0x3c0;
-    let class = ss.i16(last + wr::TOKEN_CLASS);
-    let t = if class == 3 {
+    let last = lay.word(nw) - lay.stride;
+    let class = ss.i16(last + lay.token_class);
+    let t = if lay.is09 {
+        if class == 3 {
+            if wa.i16(2) == 0 { 5 } else { 6 }
+        } else if class != 4 {
+            4
+        } else {
+            6
+        }
+    } else if class == 3 {
         if wa.i16(2) == 0 { 6 } else { 7 }
     } else if class == 4 {
         7
-    } else if ss.u8(last + wr::DOMAIN) == 0x0c {
+    } else if ss.u8(last + lay.domain) == 0x0c {
         7
     } else {
         5
     };
-    ss.set_u8(SS_TYPE, t);
+    ss.set_u8(lay.ss_type, t);
     true
 }

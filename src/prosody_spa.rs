@@ -16,6 +16,7 @@
 use std::io;
 use std::path::Path;
 
+use crate::era::Era;
 use crate::prosody::{Sentence, WordRates};
 use crate::prosody_tables_spa::*;
 use crate::tree3::Tree;
@@ -38,6 +39,19 @@ const EDGE_JUNCTURE_SPA: i16 = 51;
 /// Base phone index of a phone code (`(char)DAT_10067114[(char)code]`).
 pub fn phone_index_spa(code: u8) -> i8 {
     PHONE_INDEX_SPA[(code & 0x7f) as usize]
+}
+
+/// The 2009 tables differ from the 2014 ones (see `prosody_tables_spa.rs`).
+fn phone_index_era(era: Era, code: u8) -> i8 {
+    if era == Era::Violeta09 { PHONE_INDEX_SPA09[(code & 0x7f) as usize] } else { PHONE_INDEX_SPA[(code & 0x7f) as usize] }
+}
+
+fn phone_stress_era(era: Era, code: u8) -> u8 {
+    if era == Era::Violeta09 { PHONE_STRESS_SPA09[(code & 0x7f) as usize] } else { PHONE_STRESS_SPA[(code & 0x7f) as usize] }
+}
+
+fn phone_class8_era(era: Era, code: u8) -> u8 {
+    if era == Era::Violeta09 { PHONE_CLASS8_SPA09[(code & 0x7f) as usize] } else { PHONE_CLASS8_SPA[(code & 0x7f) as usize] }
 }
 
 /// Violeta has no 4th "grave" break level in the prosody checks (English's
@@ -117,21 +131,28 @@ pub fn duration_features_spa(s: &Sentence, wi: usize, si: usize, p: usize, ctx: 
     let nsyl = w.syllables.len();
     let last_in_word = si + 1 == nsyl && p + 1 == syl.n_phones as usize;
     let mut fv = [0i16; 11];
-    fv[0] = phone_index_spa(w.codes[k]) as i16;
+    fv[0] = phone_index_era(s.era, w.codes[k]) as i16;
     fv[1] = if si == 0 && p == 0 {
         if starts_after_pause_spa(s, wi) { EDGE_PAUSE_SPA } else { EDGE_JUNCTURE_SPA }
     } else {
-        phone_index_spa(w.codes[k - 1]) as u8 as i16
+        phone_index_era(s.era, w.codes[k - 1]) as u8 as i16
     };
     fv[2] = if last_in_word {
         if is_final_break_spa(w.brk) { EDGE_PAUSE_SPA } else { EDGE_JUNCTURE_SPA }
     } else {
-        phone_index_spa(w.codes[k + 1]) as u8 as i16
+        phone_index_era(s.era, w.codes[k + 1]) as u8 as i16
     };
-    fv[3] = PHONE_STRESS_SPA[(w.codes[k] & 0x7f) as usize] as i16;
-    let c5 = ctx[k][5];
-    fv[4] = ((c5 >> 3) & 7).min(3) as i16;
-    fv[5] = (c5 & 7).min(3) as i16;
+    fv[3] = phone_stress_era(s.era, w.codes[k]) as i16;
+    if s.era == Era::Violeta09 {
+        // viol09 FUN_1001ab00: byte 4 of the 5-byte context label, as decimal digits.
+        let c = ctx[k][4];
+        fv[4] = (c / 10) as i16;
+        fv[5] = (c % 10) as i16;
+    } else {
+        let c5 = ctx[k][5];
+        fv[4] = ((c5 >> 3) & 7).min(3) as i16;
+        fv[5] = (c5 & 7).min(3) as i16;
+    }
     fv[6] = syl.b1 as i16;
     fv[7] = syl.b2 as i16;
     fv[8] = if si == 0 && starts_after_pause_spa(s, wi) {
@@ -156,7 +177,7 @@ pub fn predict_durations_spa(trees: &TreesSpa, s: &mut Sentence, ctx: &[Vec<[u8;
                 let fv = duration_features_spa(s, wi, si, p, &ctx[wi]);
                 let k = s.words[wi].syllables[si].first_phone as usize + p;
                 let code = s.words[wi].codes[k];
-                let class = PHONE_CLASS8_SPA[(code & 0x7f) as usize];
+                let class = phone_class8_era(s.era, code);
                 let tree = match class {
                     0 => Some(&trees.vmono),
                     1 => Some(&trees.vdif),
@@ -199,13 +220,13 @@ pub fn pitch_features_spa(s: &Sentence, wi: usize, si: usize) -> [i16; 12] {
     let nsyl = w.syllables.len();
     let first = syl.first_phone as usize;
     let mut fv = [0i16; 12];
-    fv[0] = PHONE_CLASS8_SPA[(w.codes[first] & 0x7f) as usize] as i8 as i16;
+    fv[0] = phone_class8_era(s.era, w.codes[first]) as i8 as i16;
     let n = syl.n_phones as usize;
     let mut nuc = (0..n).find(|&j| w.pos_code[first + j] == 2).unwrap_or(n);
     if nuc == n {
         nuc = n.wrapping_sub(1);
     }
-    fv[1] = phone_index_spa(w.codes[first + nuc]) as u8 as i16;
+    fv[1] = phone_index_era(s.era, w.codes[first + nuc]) as u8 as i16;
     fv[2] = syl.b0 as i16;
     fv[5] = syl.b2 as i16;
     if si == 0 {

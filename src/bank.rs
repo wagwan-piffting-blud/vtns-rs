@@ -27,6 +27,14 @@ pub fn domain_from_tag(tag: &str) -> u8 {
     }
 }
 
+/// The 2009 engines' `us_DomainFromDblistTag` (julie09 `FUN_1001b3f0`): the 2014 tags plus `NAME` (0x0b).
+pub fn domain_from_tag09(tag: &str) -> u8 {
+    match tag {
+        "NAME" => 0x0b,
+        _ => domain_from_tag(tag),
+    }
+}
+
 /// One boundary feature triple (unit start, middle or end).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Boundary {
@@ -113,14 +121,31 @@ pub struct Pool {
     upm: RandomFile,
 }
 
+/// Column layout of the unit indexes, from the `ver.YYYY` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdxLayout {
+    /// `ver.2013`: file index, 7-byte label, duration code, boundaries (21 bytes per unit).
+    V2013,
+    /// `ver.2009` / `ver.2005` (the 2009 engines' `FUN_1001b050`): file index, flag, 5-byte label,
+    /// duration code, boundaries (20 bytes per unit).
+    V2009,
+}
+
 /// All pools merged into one global unit array, in dblist order.
 pub struct Bank {
     pub root: PathBuf,
     pub pools: Vec<Pool>,
+    pub layout: IdxLayout,
+    /// The `ver.YYYY` string of the first index, e.g. `ver.2013`.
+    pub version: String,
     /// Per global unit: which pool (== .dat/.upm file index).
     pub file_idx: Vec<u8>,
-    /// Per global unit: `[L2, L1, C, R1, R2, posbits, flags]`.
+    /// ver.2013 only, per global unit: `[L2, L1, C, R1, R2, posbits, flags]`.
     pub label: Vec<[u8; 7]>,
+    /// ver.2009 only, per global unit: `[L1, C, R1, posbits, flags]`.
+    pub label5: Vec<[u8; 5]>,
+    /// ver.2009 only, per global unit: the 0/1 column at pool +0x4c.
+    pub flag: Vec<u8>,
     pub dur_code: Vec<u8>,
     /// Per global unit: start / middle / end boundary features.
     pub bounds: Vec<[Boundary; 3]>,
@@ -139,8 +164,12 @@ impl Bank {
         let mut bank = Bank {
             root: m16.to_path_buf(),
             pools: Vec::new(),
+            layout: IdxLayout::V2013,
+            version: String::new(),
             file_idx: Vec::new(),
             label: Vec::new(),
+            label5: Vec::new(),
+            flag: Vec::new(),
             dur_code: Vec::new(),
             bounds: Vec::new(),
         };
@@ -155,39 +184,74 @@ impl Bank {
     fn load_pool(&mut self, file: &str, tag: &str) -> io::Result<()> {
         let path = self.root.join("mc_idx_tbl").join(file);
         let raw = std::fs::read(&path)?;
-        let rd16 = |p: usize| u16::from_le_bytes([raw[p], raw[p + 1]]);
-        let hdr = raw[0] as usize;
-        if !raw[1..].starts_with(b"ver.") {
-            return Err(bad(format!("{}: not a ver.2013 index", path.display())));
+        let short = || bad(format!("{}: truncated index", path.display()));
+        if raw.len() < 9 {
+            return Err(short());
         }
-        let mut p = 1 + hdr;
-        let nfiles = rd16(p) as usize;
+        // Headerless indexes use the interleaved legacy records (`us_ReadUnitColumnsLegacy`); no
+        // known bank ships them.
+        if !raw[1..].starts_with(b"ver.") {
+            return Err(bad(format!("{}: headerless (pre-2005) index, not supported", path.display())));
+        }
+        let version = String::from_utf8_lossy(&raw[1..9]).into_owned();
+        let layout = if version == "ver.2013" { IdxLayout::V2013 } else { IdxLayout::V2009 };
+        if self.pools.is_empty() {
+            self.layout = layout;
+            self.version = version;
+        } else if layout != self.layout {
+            return Err(bad(format!("{}: {} mixed with {} in one bank", path.display(), version, self.version)));
+        }
+        let rd16 = |p: usize| raw.get(p..p + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).ok_or_else(short);
+        let mut p = 1 + raw[0] as usize;
+        let nfiles = rd16(p)?;
         p += 2;
         if nfiles != 1 {
             return Err(bad(format!("{}: {} dat files per pool", path.display(), nfiles)));
         }
-        let ln = rd16(p) as usize;
-        let dat_name = String::from_utf8_lossy(&raw[p + 2..p + 2 + ln]).into_owned();
+        let ln = rd16(p)?;
+        let dat_name = String::from_utf8_lossy(raw.get(p + 2..p + 2 + ln).ok_or_else(short)?).into_owned();
         p += 2 + ln + 1;
-        let n = u32::from_le_bytes(raw[p..p + 4].try_into().unwrap());
+        let n = u32::from_le_bytes(raw.get(p..p + 4).ok_or_else(short)?.try_into().unwrap());
         p += 4;
-        let s = rd16(p) as usize;
+        let s = rd16(p)?;
         p += 2;
         if s != PRIMARY_SIZE {
             return Err(bad(format!("{}: primary size {}", path.display(), s)));
         }
         let nn = n as usize;
+        let cols = match layout {
+            IdxLayout::V2013 => 1 + 7 + 1 + 12,
+            IdxLayout::V2009 => 1 + 1 + 5 + 1 + 12,
+        };
+        let need = p + (PRIMARY_SIZE + cols) * nn;
+        if need != raw.len() {
+            return Err(bad(format!("{}: {} bytes, expected {} for {} units", path.display(), raw.len(), need, nn)));
+        }
         let primary_off = p as u64;
         p += s * nn;
         let fidx = self.pools.len() as u8;
         self.file_idx.extend(std::iter::repeat(fidx).take(nn));
         p += nn;
-        for i in 0..nn {
-            let mut l = [0u8; 7];
-            l.copy_from_slice(&raw[p + 7 * i..p + 7 * i + 7]);
-            self.label.push(l);
+        match layout {
+            IdxLayout::V2013 => {
+                for i in 0..nn {
+                    let mut l = [0u8; 7];
+                    l.copy_from_slice(&raw[p + 7 * i..p + 7 * i + 7]);
+                    self.label.push(l);
+                }
+                p += 7 * nn;
+            }
+            IdxLayout::V2009 => {
+                self.flag.extend_from_slice(&raw[p..p + nn]);
+                p += nn;
+                for i in 0..nn {
+                    let mut l = [0u8; 5];
+                    l.copy_from_slice(&raw[p + 5 * i..p + 5 * i + 5]);
+                    self.label5.push(l);
+                }
+                p += 5 * nn;
+            }
         }
-        p += 7 * nn;
         self.dur_code.extend_from_slice(&raw[p..p + nn]);
         p += nn;
         let start = self.bounds.len();
@@ -203,14 +267,11 @@ impl Bank {
             }
             p += 4 * nn;
         }
-        if p != raw.len() {
-            return Err(bad(format!("{}: {} trailing bytes", path.display(), raw.len() as isize - p as isize)));
-        }
         let name = file.trim_start_matches("unit-").trim_end_matches(".idx").to_string();
         self.pools.push(Pool {
             name,
             tag: tag.to_string(),
-            domain: domain_from_tag(tag),
+            domain: if layout == IdxLayout::V2009 { domain_from_tag09(tag) } else { domain_from_tag(tag) },
             base: start as u32,
             n,
             idx: RandomFile::open(&path)?,
@@ -222,11 +283,11 @@ impl Bank {
     }
 
     pub fn len(&self) -> usize {
-        self.label.len()
+        self.dur_code.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.label.is_empty()
+        self.dur_code.is_empty()
     }
 
     /// (pool, local index) of a global unit.

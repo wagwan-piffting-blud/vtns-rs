@@ -184,6 +184,11 @@ const PUNCT: &[u8] = b"`~!@#$%^&*()-_+=|\\[]{};:'\"<>?,./";
 
 /// `FUN_10006ce0(a, b, c)`: syntactic class of `b` given its neighbours.
 pub fn word_class(a: Option<&[u8]>, b: Option<&[u8]>, c: Option<&[u8]>) -> i16 {
+    word_class_e(false, a, b, c)
+}
+
+/// 2009 (`FUN_100068e0`): after "'s" only the object-pronoun list is checked.
+pub fn word_class_e(e09: bool, a: Option<&[u8]>, b: Option<&[u8]>, c: Option<&[u8]>) -> i16 {
     let b = match b {
         Some(x) if !x.is_empty() => x,
         _ => return 0,
@@ -210,7 +215,7 @@ pub fn word_class(a: Option<&[u8]>, b: Option<&[u8]>, c: Option<&[u8]>) -> i16 {
             if ci(a, b"let") {
                 return 8;
             }
-            if in_list(&L_OBJPRON, a) || in_list(&L_SUBJPRON, a) || in_list(&L_WH, a) {
+            if in_list(&L_OBJPRON, a) || (!e09 && (in_list(&L_SUBJPRON, a) || in_list(&L_WH, a))) {
                 return 3;
             }
         }
@@ -350,6 +355,29 @@ impl PosList {
 pub struct Cv<'a> {
     pub ws: &'a Ws,
     pub n: usize,
+    /// julie09 / paul09 rule set (`FUN_10004940`, `FUN_10004300`, `FUN_100068e0`).
+    pub e09: bool,
+}
+
+/// 2009 frequency-adverb list (`FUN_10010210`, julie09 0x10074630): 15 entries, 2014 has 20.
+static ADVFREQ09: [&[u8]; 15] = [
+    b"almost", b"also", b"always", b"even", b"hardly", b"just", b"never", b"often", b"only", b"quite", b"rarely", b"really",
+    b"seldom", b"sometimes", b"usually",
+];
+
+/// 2009 subject-pronoun list (julie09 0x100744c0): 7 entries, 2014 has 10.
+static SUBJ09: [&[u8]; 7] = [b"he", b"i", b"it", b"she", b"they", b"we", b"you"];
+
+impl<'a> Cv<'a> {
+    fn advfreq(&self, p: &[u8]) -> bool {
+        let l: &[&[u8]] = if self.e09 { &ADVFREQ09 } else { &L_ADVFREQ };
+        in_list(l, p)
+    }
+
+    fn subj(&self, p: &[u8]) -> bool {
+        let l: &[&[u8]] = if self.e09 { &SUBJ09 } else { &L_SUBJPRON };
+        in_list(l, p)
+    }
 }
 
 impl<'a> Cv<'a> {
@@ -590,7 +618,7 @@ fn rules(c: &Cv, i: usize) -> R {
             return Tag(b'%');
         }
         if !ci(p, b"feel") {
-            if ci(p, b"fisherman") || ci(p, b"fishermans") {
+            if !c.e09 && (ci(p, b"fisherman") || ci(p, b"fishermans")) {
                 return Tag(0x13);
             }
             return after_c99(c);
@@ -617,8 +645,7 @@ fn rules(c: &Cv, i: usize) -> R {
                 && !ci(x, b"upon")
                 && !ci(x, b"call")
                 && !ci(x, b"calls")
-                && !ci(x, b"look")
-                && !ci(x, b"looks")
+                && (c.e09 || (!ci(x, b"look") && !ci(x, b"looks")))
                 && suffix_class(Some(x)) != 2
             {
                 return l4f97();
@@ -633,14 +660,14 @@ fn rules(c: &Cv, i: usize) -> R {
         }
         return Tag(b'*');
     }
-    if ci(w, b"contest") || ci(w, b"contests") {
+    if !c.e09 && (ci(w, b"contest") || ci(w, b"contests")) {
         let lc = len_code(w);
         if !has(1) || !in_list(&L_BE, n1.unwrap()) {
             return Fallback;
         }
         return if lc != -9 { Tag(0x16) } else { Tag(0x13) };
     }
-    if ci(w, b"converts") {
+    if !c.e09 && ci(w, b"converts") {
         if !has(1) || !q(n1, b"from") {
             if i > 0 && (q(p1, b"the") || q(p1, b"a")) {
                 return Tag(0x16);
@@ -696,7 +723,7 @@ fn rules(c: &Cv, i: usize) -> R {
                     return Fallback;
                 }
                 let x = n1.unwrap();
-                if !ci(x, b"number") && !ci(x, b"numbers") {
+                if c.e09 || (!ci(x, b"number") && !ci(x, b"numbers")) {
                     return Fallback;
                 }
                 return Tag(0x13);
@@ -717,6 +744,12 @@ fn rules(c: &Cv, i: usize) -> R {
             return if ci(p, b"an") { Tag(0x13) } else { Fallback };
         }
         if ci(w, b"increase") || ci(w, b"increases") {
+            if c.e09 {
+                if !has(1) || !q(n1, b"in") {
+                    return Fallback;
+                }
+                return Tag(0x13);
+            }
             let lc = len_code(w);
             if i > 0 {
                 let p = p1.unwrap();
@@ -762,7 +795,7 @@ fn rules(c: &Cv, i: usize) -> R {
             }
             return Tag(0x13);
         }
-        if ci(w, b"laden") {
+        if !c.e09 && ci(w, b"laden") {
             if has(1) && q(n1, b"'s") {
                 return Tag(0x14);
             }
@@ -802,7 +835,7 @@ fn rules(c: &Cv, i: usize) -> R {
                     return Fallback;
                 }
                 let p = p1.unwrap();
-                if !in_list(&L_ADVFREQ, p) {
+                if !c.advfreq(p) {
                     if !ci(p, b"have") && !ci(p, b"had") && !ci(p, b"been") {
                         return Fallback;
                     }
@@ -868,7 +901,7 @@ fn rules(c: &Cv, i: usize) -> R {
             }
             return if ci(x, b"?") { Tag(0x0e) } else { Fallback };
         }
-        if ci(w, b"polish") {
+        if !c.e09 && ci(w, b"polish") {
             if !has(1) {
                 return Fallback;
             }
@@ -898,7 +931,7 @@ fn rules(c: &Cv, i: usize) -> R {
                     return r;
                 }
             } else {
-                if in_list(&L_SUBJPRON, p1.unwrap()) {
+                if c.subj(p1.unwrap()) {
                     return Tag(b'%');
                 }
                 if !in_list(&L_NUMWORD, p1.unwrap()) {
@@ -915,7 +948,7 @@ fn rules(c: &Cv, i: usize) -> R {
             }
             return if len_code(w) != -8 { Tag(b'*') } else { Tag(b'%') };
         }
-        if ci(w, b"resume") || ci(w, b"resumes") {
+        if !c.e09 && (ci(w, b"resume") || ci(w, b"resumes")) {
             let lc = len_code(w);
             if i < 2 || !has(1) {
                 return Fallback;
@@ -930,7 +963,7 @@ fn rules(c: &Cv, i: usize) -> R {
             return if lc == -8 { Tag(b'%') } else { Tag(b'*') };
         }
         if ci(w, b"separate") || ci(w, b"separates") {
-            if i > 0 && (q(p1, b"be") || word_class(None, p1, None) == 3) {
+            if !c.e09 && i > 0 && (q(p1, b"be") || word_class(None, p1, None) == 3) {
                 return Tag(0x0e);
             }
             let nx_ok = has(1) && {
@@ -1032,7 +1065,7 @@ fn live_rule(c: &Cv, i: usize, w: &[u8]) -> R {
         }
         return l6392();
     }
-    if has(2) && q(n1, b"on") && q(n2, b"TV") {
+    if !c.e09 && has(2) && q(n1, b"on") && q(n2, b"TV") {
         return if lc == -6 { Tag(0x0e) } else { Tag(0x16) };
     }
     let go_6559 = if has(1) {
@@ -1066,8 +1099,8 @@ fn live_rule(c: &Cv, i: usize, w: &[u8]) -> R {
             return Fallback;
         }
         let p = p1.unwrap();
-        if !ci(p, b"Window") && !ci(p, b"Windows") && !ci(p, b"xbox") {
-            if !ci(p, b"the") && !ci(p, b"a") {
+        if !ci(p, b"Window") && !ci(p, b"Windows") && (c.e09 || !ci(p, b"xbox")) {
+            if c.e09 || (!ci(p, b"the") && !ci(p, b"a")) {
                 return Fallback;
             }
             return if lc != -6 { Tag(0x16) } else { Tag(0x0e) };
@@ -1147,7 +1180,7 @@ fn fallback(c: &Cv, i: usize, l: &PosList) -> Option<i32> {
             }
         }
     }
-    if has(1) && q(n1, b"'s") {
+    if !c.e09 && has(1) && q(n1, b"'s") {
         for t in [0x14u8, 0x15, 0x13, 0x16] {
             let u = l.find(t);
             if u >= 0 {
@@ -1173,13 +1206,13 @@ fn fallback(c: &Cv, i: usize, l: &PosList) -> Option<i32> {
             }
             return some(fl.rb);
         }
-        if !in_list(&L_ADVFREQ, p) {
+        if !c.advfreq(p) {
             let v = p_910690(p);
             if v {
                 return l460e(&fl, l);
             }
         } else {
-            if i > 2 && word_class(c.sp(i, -3), c.sp(i, -2), None) == 3 {
+            if !c.e09 && i > 2 && word_class(c.sp(i, -3), c.sp(i, -2), None) == 3 {
                 let u = l.find(b'(');
                 if u >= 0 {
                     return Some(u);
@@ -1196,7 +1229,7 @@ fn fallback(c: &Cv, i: usize, l: &PosList) -> Option<i32> {
         }
     }
     // LAB_100045d6
-    if i > 1 && word_class(c.sp(i, -2), p1, Some(w)) == 7 {
+    if i > 1 && word_class_e(c.e09, c.sp(i, -2), p1, Some(w)) == 7 {
         return l460e(&fl, l);
     }
     if has(1) && p_910790(n1.unwrap()) {
@@ -1247,7 +1280,7 @@ fn fallback(c: &Cv, i: usize, l: &PosList) -> Option<i32> {
                 return Some(u);
             }
         }
-        if in_list(&L_SUBJPRON, p) && !ci(p, b"it") {
+        if c.subj(p) && !ci(p, b"it") {
             let mut u = l.find(b'%');
             if u < 0 {
                 u = l.find(b'&');
@@ -1298,10 +1331,10 @@ fn poly_features(c: &Cv, i: usize, class: i16) -> [i16; 15] {
         prep_code(s(-1)),
         prep_code(s(1)),
         prep_code(s(2)),
-        word_class(s(-3), s(-2), s(-1)),
-        word_class(s(-2), s(-1), w0),
-        word_class(w0, s(1), s(2)),
-        word_class(s(1), s(2), s(3)),
+        word_class_e(c.e09, s(-3), s(-2), s(-1)),
+        word_class_e(c.e09, s(-2), s(-1), w0),
+        word_class_e(c.e09, w0, s(1), s(2)),
+        word_class_e(c.e09, s(1), s(2), s(3)),
         suffix_class(s(-2)),
         suffix_class(s(-1)),
         suffix_class(w0),

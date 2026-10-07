@@ -10,16 +10,30 @@ use super::norm;
 use super::tokenize::{tokenize, Tok};
 use super::wa::Wa;
 use super::Fe;
+use crate::era::Era;
 
 type Norm = fn(&Fe, &mut Wa, &mut Tok, &[u8], usize, i32) -> i32;
 
 /// The chain after the URL normalizer, in engine order; all share the
 /// `joined_r0x1003d772` continuation.
 const AFTER_URL: [Norm; 7] = [norm::currency, norm::date, norm::time, norm::phone, norm::digits_a, norm::digits_b, norm::units];
+/// julie09 `FUN_1004f700` runs before `FUN_1004f140`.
+const AFTER_URL_JULIE09: [Norm; 7] = [norm::currency, norm::date, norm::time, norm::phone, norm::digits_b, norm::digits_a, norm::units];
+/// paul09 has no `digits_a`.
+const AFTER_URL_PAUL09: [Norm; 6] = [norm::currency, norm::date, norm::time, norm::phone, norm::digits_b, norm::units];
+
+fn after_url(era: Era) -> &'static [Norm] {
+    match era {
+        Era::Julie09 => &AFTER_URL_JULIE09,
+        Era::Paul09 => &AFTER_URL_PAUL09,
+        _ => &AFTER_URL,
+    }
+}
 
 /// Normalize the sentence starting at `t[p0..]`. Returns 1 when words were
 /// produced, -1 otherwise (the engine's `((n < 1) - 1 & 2) - 1`).
 pub fn normalize_tokens(fe: &Fe, wa: &mut Wa, t: &[u8], p0: usize) -> i32 {
+    super::cstr::set_era(fe.era);
     let mut p = p0;
     let mut mark: i16 = 0;
     let mut tok = Tok::default();
@@ -177,7 +191,7 @@ pub fn normalize_tokens(fe: &Fe, wa: &mut Wa, t: &[u8], p0: usize) -> i32 {
         wa.clear_rec(i7);
 
         let mut handled = false;
-        for f in AFTER_URL.iter() {
+        for f in after_url(fe.era).iter() {
             let r = f(fe, wa, &mut tok, t, p, off);
             if r >= 0 {
                 match accept(wa, r, &mut p, mark, s1, i7, off) {
@@ -208,10 +222,11 @@ pub fn normalize_tokens(fe: &Fe, wa: &mut Wa, t: &[u8], p0: usize) -> i32 {
             } else {
                 let i6 = mark as i32;
                 let n = wa.n() as i32;
+                let city_flag = if fe.era == Era::Paul09 { 0x1e } else { 0x1f };
                 let keep = wa.ri32(i6 - 1, 0x28) == 0x12
                     && wa.ri32(i6 - 1, 0x2c) == 2
                     && wa.ri32(n - 1, 0x28) == 0x12
-                    && !(wa.i16(Wa::rec(i6 - 1) + 0x1e) == 0x1f && wa.i16(Wa::rec(n - 1) + 0x1e) == 0x1f);
+                    && !(wa.i16(Wa::rec(i6 - 1) + 0x1e) == city_flag && wa.i16(Wa::rec(n - 1) + 0x1e) == city_flag);
                 if !keep {
                     stop_at_mark(wa, mark, s1, i7, off);
                     return finish(wa);

@@ -75,9 +75,13 @@ pub fn numword(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32
         let tt = tok_at(fe, t, p, off, 0, 2);
         let mut u4 = tt.consumed;
         if !well_formed(&tt.text) {
-            if count_char(&tt.text, b'.') < 2 {
+            if fe.era == crate::era::Era::Paul09 {
+                // paul09 FUN_1003db00 always reads digit by digit (FUN_1005ab30).
+                digits(&mut buf, &tt.text, 0, 0);
+            } else if count_char(&tt.text, b'.') < 2 {
                 let v = atoi(&tt.text);
-                digits(&mut buf, &tt.text, 0, (v == 0) as i16);
+                // julie09 FUN_1003df20 passes 0 where 2014 passes (atoi == 0).
+                digits(&mut buf, &tt.text, 0, if fe.era.is_2009() { 0 } else { (v == 0) as i16 });
             } else {
                 dotted(&mut buf, &tt.text, 0, 0);
             }
@@ -165,13 +169,15 @@ pub fn numword(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32
                     st = if b.class == 1 && tt.ws > 0 { L::L179a } else { L::L317 };
                 }
                 L::L179a => {
-                    let colon_dash = (nx.class == 3 || nx.class == 7) && nx.len == 1 && (nx.text[0] == b':' || nx.text[0] == b'-');
+                    // paul09 FUN_1003db00: only ':' joins, and the first number is read without the score check.
+                    let paul = fe.era == crate::era::Era::Paul09;
+                    let colon_dash = (nx.class == 3 || nx.class == 7) && nx.len == 1 && (nx.text[0] == b':' || (!paul && nx.text[0] == b'-'));
                     if colon_dash && nx.ws == 0 {
                         let i8c = u4 + i8_;
                         let m = tok_at(fe, t, p, off, i8c, 0);
                         if m.class == 2 && super::sbd::all_digit(&m.text) && nx.ws == m.ws {
                             let u = i8c + m.consumed;
-                            if score_context(fe, t, p, off, b'B', u) {
+                            if paul || score_context(fe, t, p, off, b'B', u) {
                                 number(&mut buf, &tt.text, 1);
                                 if !emit(wa, &buf, tt.start, m.end) {
                                     return 0;

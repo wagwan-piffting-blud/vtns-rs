@@ -18,13 +18,16 @@ pub mod analysis;
 pub mod breaks;
 pub mod context;
 pub mod funcwords;
+pub mod lay;
 pub mod lookup;
 pub mod lts;
 pub mod merge;
 pub mod morph;
+pub mod phtabs;
 pub mod syllab;
 pub mod tagger;
 pub mod tables;
+pub mod tables09;
 pub mod words;
 
 pub const WA_HEAD: usize = 0x14;
@@ -347,7 +350,11 @@ impl<'a> WordStrings<'a> {
     }
 
     pub fn text(&self, ss: &Ss, i: usize) -> &'a [u8] {
-        self.resolve(ss.u32(Ss::word(i) + wr::TEXT_PTR))
+        self.text_lay(&lay::L14, ss, i)
+    }
+
+    pub fn text_lay(&self, lay: &lay::Lay, ss: &Ss, i: usize) -> &'a [u8] {
+        self.resolve(ss.u32(lay.word(i) + lay.text_ptr))
     }
 
     pub fn phones(&self, ss: &Ss, i: usize) -> &'a [u8] {
@@ -357,7 +364,11 @@ impl<'a> WordStrings<'a> {
     /// Raw byte `k` of the word's WA phone string (the engine indexes it
     /// directly, past the NUL if asked).
     pub fn phone_byte(&self, ss: &Ss, i: usize, k: usize) -> u8 {
-        let p = ss.u32(Ss::word(i) + wr::PH_PTR);
+        self.phone_byte_lay(&lay::L14, ss, i, k)
+    }
+
+    pub fn phone_byte_lay(&self, lay: &lay::Lay, ss: &Ss, i: usize, k: usize) -> u8 {
+        let p = ss.u32(lay.word(i) + lay.ph_ptr);
         if p & TAG_MASK == TAG_WA {
             let o = (p & !TAG_MASK) as usize + k;
             *self.wa.b.get(o).unwrap_or(&0)

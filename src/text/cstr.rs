@@ -4,10 +4,68 @@
 //! terminated, read past the end as zeros. Engine tables are read by virtual
 //! address from `tables::CHUNKS` (generated from the DLL's data sections).
 
-use super::tables::CHUNKS;
+use std::cell::Cell;
 
-/// Bytes of engine data from `va` to the end of its generated region.
+use super::tables::CHUNKS;
+use super::{tables_julie09, tables_paul09};
+use crate::era::Era;
+
+thread_local! {
+    static ERA: Cell<Era> = const { Cell::new(Era::V2014) };
+}
+
+/// Select the build whose engine data `mem` serves on this thread; every front-end entry point sets it.
+pub fn set_era(e: Era) {
+    ERA.with(|c| c.set(e));
+}
+
+pub fn era() -> Era {
+    ERA.with(|c| c.get())
+}
+
+fn find(chunks: &'static [(u32, &'static [u8])], va: u32) -> Option<&'static [u8]> {
+    let i = match chunks.binary_search_by(|&(a, _)| a.cmp(&va)) {
+        Ok(i) => i,
+        Err(0) => return None,
+        Err(i) => i - 1,
+    };
+    let (a, d) = chunks[i];
+    let off = (va - a) as usize;
+    if off < d.len() {
+        Some(&d[off..])
+    } else {
+        None
+    }
+}
+
+/// A table that outgrew its 2014 slot lives elsewhere; reads that start at its 2014 address follow it.
+fn reloc(map: &'static [(u32, u32)], va: u32) -> u32 {
+    match map.binary_search_by(|&(a, _)| a.cmp(&va)) {
+        Ok(i) => map[i].1,
+        Err(_) => va,
+    }
+}
+
+/// Where the table whose 2014 base is `va` really starts in the current build.
+pub fn table_base(va: u32) -> u32 {
+    match era() {
+        Era::Julie09 => reloc(tables_julie09::RELOC, va),
+        Era::Paul09 => reloc(tables_paul09::RELOC, va),
+        _ => va,
+    }
+}
+
+/// Bytes of engine data from `va` to the end of its generated region. The 2009 builds first consult their
+/// override regions (tables that differ from the 2014 build, keyed by the 2014 address the code uses).
 pub fn mem(va: u32) -> &'static [u8] {
+    let over = match era() {
+        Era::Julie09 => find(tables_julie09::CHUNKS, reloc(tables_julie09::RELOC, va)),
+        Era::Paul09 => find(tables_paul09::CHUNKS, reloc(tables_paul09::RELOC, va)),
+        _ => None,
+    };
+    if let Some(m) = over {
+        return m;
+    }
     let i = match CHUNKS.binary_search_by(|&(a, _)| a.cmp(&va)) {
         Ok(i) => i,
         Err(0) => panic!("engine VA {:#x} not generated", va),
@@ -109,9 +167,9 @@ pub fn latin_letter(c: u8) -> bool {
     (c > 0xbf && c != 0xd7 && c != 0xf7) || matches!(c, 0x8a | 0x8c | 0x9a | 0x9c | 0x9f)
 }
 
-/// EUC-KR double-byte start: `0xa1..=0xad` + `0xa1..=0xfe`, `fd fe`, or `ae a1..=c2`.
+/// EUC-KR double-byte start: `0xa1..=0xad` + `0xa1..=0xfe`, `fd fe` (2014 only), or `ae a1..=c2`.
 pub fn dbcs_pair(c0: u8, c1: u8) -> bool {
-    ((0xa0 < c0 && c0 < 0xae) && (0xa0 < c1 && c1 != 0xff)) || (c0 == 0xfd && c1 == 0xfe) || (c0 == 0xae && (0xa0 < c1 && c1 < 0xc3))
+    ((0xa0 < c0 && c0 < 0xae) && (0xa0 < c1 && c1 != 0xff)) || (c0 == 0xfd && c1 == 0xfe && !era().is_2009()) || (c0 == 0xae && (0xa0 < c1 && c1 < 0xc3))
 }
 
 /// Byte `i` of a NUL-terminated buffer; out of range reads as NUL.

@@ -19,6 +19,7 @@
 
 use std::path::Path;
 
+use crate::era::Era;
 use crate::lexicon::lookup2;
 
 include!("tables_spa_chars.rs");
@@ -114,7 +115,10 @@ pub const W_FOREIGN_WORDS: [&[u8]; 10] =
 /// The 5 Mexican-place-name prefix/whole-word checks (`s_mexic_10067d50` ..
 /// `s_oaxaq_10067d30`) that set the `mexican_ctx` flag. `M\xe9xico` is a
 /// whole-word compare; the other four are 5-char prefix compares.
-pub fn mexican_ctx_spa(word: &[u8]) -> bool {
+pub fn mexican_ctx_spa(word: &[u8], era09: bool) -> bool {
+    if era09 {
+        return starts_with_ci(word, b"mexic") || eq_ci(word, b"m\xe9xico");
+    }
     starts_with_ci(word, b"mexic") || eq_ci(word, b"m\xe9xico") || starts_with_ci(word, b"mexiq") || starts_with_ci(word, b"oaxac") || starts_with_ci(word, b"oaxaq")
 }
 
@@ -569,12 +573,18 @@ pub struct LexiconSpa {
     pub emb: HashDictSpa,
     pub tpp: HashDictSpa,
     pub wab: WabList,
+    pub era: Era,
 }
 
 impl LexiconSpa {
     /// `dict_spa` = `all_voices/data-common/dict-spa`.
     pub fn open(dict_spa: &Path) -> std::io::Result<LexiconSpa> {
+        LexiconSpa::open_era(dict_spa, Era::V2014)
+    }
+
+    pub fn open_era(dict_spa: &Path, era: Era) -> std::io::Result<LexiconSpa> {
         Ok(LexiconSpa {
+            era,
             emb: HashDictSpa::open(&dict_spa.join("hashparams"), &dict_spa.join("hashcont"), &dict_spa.join("hashidx"), &dict_spa.join("spattsdict"))?,
             tpp: HashDictSpa::open(
                 &dict_spa.join("hashparams_spa_tpp"),

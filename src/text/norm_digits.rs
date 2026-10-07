@@ -248,7 +248,8 @@ fn alpha_reject(idx: i32, groups: &[&Slot]) -> bool {
 
 pub fn digits_a(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i32) -> i32 {
     let _ = tok;
-    let slots = collect(fe, t, p, off, 0x1d, group_a, 11, None);
+    // julie09 FUN_1004f140 stops after 10 slots (2014: 11).
+    let slots = collect(fe, t, p, off, 0x1d, group_a, if fe.era.is_2009() { 10 } else { 11 }, None);
     if slots.is_empty() {
         return -1;
     }
@@ -279,7 +280,12 @@ pub fn digits_a(fe: &Fe, wa: &mut Wa, tok: &mut Tok, t: &[u8], p: usize, off: i3
                 if alpha_reject(idx, &groups) {
                     return -1;
                 }
-                return if emit_a(fe, wa, &slots[..nn]) { consumed } else { 0 };
+                if emit_a(fe, wa, &slots[..nn]) {
+                    return consumed;
+                }
+                // julie09 (FUN_1004f140) declines a run whose group is neither spelled nor digits ("401K-2345-...")
+                // where 2014 ends the sentence; observed in b2_item16_digits, the decompile shows no difference.
+                return if era() == crate::era::Era::Julie09 { -1 } else { 0 };
             }
         }
         nn -= 1;

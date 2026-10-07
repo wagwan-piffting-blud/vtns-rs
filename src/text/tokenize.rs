@@ -89,6 +89,7 @@ fn high_action(t: &[u8], p: isize, buf: &[u8; 48], len: i32) -> High {
         0xb1 => Ncpy2(0x1009c44c),
         0xb2 => Ncpy2(0x1009c448),
         0xb3 => Ncpy2(0x1009c444),
+        0xb5 if era() ==crate::era::Era::Paul09 => Raw,
         0xb5 => Ncpy2(0x10080590),
         0xb9 => Ncpy2(0x1009c440),
         0xbb => Ncpy1(0x1007d4f8),
@@ -284,7 +285,7 @@ pub fn tokenize(tok: &mut Tok, t: &[u8], p0: usize, off: i32, mode: i32, ud: Opt
                 if c > 0x7f
                     && ad24(c) != 0
                     && (c < 0xa1 || c > 0xad || c1 < 0xa1 || c1 == 0xff)
-                    && !(c == 0xfd && c1 == 0xfe)
+                    && !(c == 0xfd && c1 == 0xfe && !era().is_2009())
                     && (c != 0xae || c1 < 0xa1 || c1 > 0xc2)
                 {
                     st = L::HighByte;
@@ -759,7 +760,7 @@ pub fn tokenize(tok: &mut Tok, t: &[u8], p0: usize, off: i32, mode: i32, ud: Opt
                 let c = at(t, p);
                 let c1 = at(t, p + 1);
                 i6 = len;
-                if !latin_letter(c) || ad24(c) == 0 || ((0xa0 < c && c < 0xae) && (0xa0 < c1 && c1 != 0xff)) || (c == 0xfd && c1 == 0xfe) {
+                if !latin_letter(c) || ad24(c) == 0 || ((0xa0 < c && c < 0xae) && (0xa0 < c1 && c1 != 0xff)) || (c == 0xfd && c1 == 0xfe && !era().is_2009()) {
                     st = L::Bc15;
                     continue;
                 }
@@ -1154,7 +1155,7 @@ pub fn tokenize(tok: &mut Tok, t: &[u8], p0: usize, off: i32, mode: i32, ud: Opt
                             st = L::Ab9d;
                             continue;
                         }
-                        if len == 0 && c == b'\'' && lower(at(t, p + 1)) == 0x73 && cls(at(t, p + 2)) & 0xc0 == 0 {
+                        if era() != crate::era::Era::Paul09 && len == 0 && c == b'\'' && lower(at(t, p + 1)) == 0x73 && cls(at(t, p + 2)) & 0xc0 == 0 {
                             buf[0] = b'\'';
                             st = L::B932;
                             continue;

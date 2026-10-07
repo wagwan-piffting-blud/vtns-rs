@@ -14,6 +14,7 @@ pub mod norm_compound;
 pub mod norm_date;
 pub mod norm_digits;
 pub mod norm_fraction;
+pub mod norm_math;
 pub mod norm_numword;
 pub mod norm_phone;
 pub mod norm_symbols;
@@ -31,6 +32,8 @@ pub mod phrases;
 pub mod sbd;
 pub mod tables;
 pub mod tables_address;
+pub mod tables_julie09;
+pub mod tables_paul09;
 pub mod tabs;
 pub mod tokenize;
 pub mod txt2;
@@ -41,6 +44,7 @@ pub mod window;
 use std::io;
 use std::path::Path;
 
+use crate::era::Era;
 use crate::tree3::Tree;
 
 pub use wa::Wa;
@@ -63,16 +67,22 @@ pub struct Fe {
     /// Match the 64-bit voice DLLs where they read uninitialized stack
     /// differently (see `norm_n15::abbr`).
     pub x64: bool,
+    pub era: Era,
 }
 
 impl Fe {
     /// `common` is `data-common` (holding `dict-eng` and `userdict`).
     pub fn load(common: &Path) -> io::Result<Fe> {
+        Fe::load_era(common, Era::V2014)
+    }
+
+    /// Paul09 reads `sbd.tree2`; the other builds `sbd.tree3`.
+    pub fn load_era(common: &Path, era: Era) -> io::Result<Fe> {
         let d = common.join("dict-eng");
         let ud = std::fs::read(common.join("userdict").join("userdict_eng.csv")).ok().and_then(|b| userdict::UserDict::load(&b));
         Ok(Fe {
             ud,
-            sbd: Tree::load(&d.join("sbd.tree3"))?,
+            sbd: if era == Era::Paul09 { crate::tree2::load(&d.join("sbd.tree2"), false)? } else { Tree::load(&d.join("sbd.tree3"))? },
             abbrh: txt2::List::load(&d.join("abbrh_sort.txt2"), b'M')?,
             abbrt: txt2::List::load(&d.join("abbrt_sort.txt2"), b'M')?,
             abbrc: txt2::List::load(&d.join("abbrc_sort.txt2"), b'M')?,
@@ -83,6 +93,7 @@ impl Fe {
             tpp: crate::lexicon::HashDict::open(&d, "eng_tpp", "tppdict_eng")?,
             emb: crate::lexicon::HashDict::open(&d, "emb", "engttsdict_emb")?,
             x64: false,
+            era,
         })
     }
 

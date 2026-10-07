@@ -379,6 +379,8 @@ fn cli_main(args: &[String]) {
         None => "paul",
     };
     let root = find_data_root(data, voice);
+    // The 2009 Julie install spells its directory data-julie.
+    let voice = if voice == "juli" && !is_data_root(&root, voice) && is_data_root(&root, "julie") { "julie" } else { voice };
     if !is_data_root(&root, voice) {
         eprintln!("vtpaul: no voice data in {} (expected data-{}\\M16 and data-common there; see --data)", root.display(), voice);
         exit(1);

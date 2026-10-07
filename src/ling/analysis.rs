@@ -12,7 +12,7 @@ use crate::lexicon::Lexicon;
 use crate::tree3::Tree;
 
 /// `dict_CopyMorphsToWordArray`.
-pub fn copy_morphs(ws: &mut Ws, wa: &Wa, n_tokens: usize, poly: &Tree) {
+pub fn copy_morphs(ws: &mut Ws, wa: &Wa, n_tokens: usize, poly: &Tree, e09: bool) {
     ws.set_i16(MORPH_COUNT, 0);
     let nc = ws.i16(0).max(0) as usize;
     for i in 0..nc {
@@ -25,7 +25,7 @@ pub fn copy_morphs(ws: &mut Ws, wa: &Wa, n_tokens: usize, poly: &Tree) {
         let pron = if ws.i16(c + cand::COUNT) < 2 {
             ws.cstr(c + cand::PRON).to_vec()
         } else {
-            let cv = Cv { ws: &*ws, n: nc };
+            let cv = Cv { ws: &*ws, n: nc, e09 };
             choose_pron(&cv, i, n_tokens, poly)
         };
         ws.strcpy(m + mr::PRON, &pron);
@@ -53,7 +53,7 @@ pub fn tag_and_lookup(ws: &mut Ws, wa: &Wa, n: usize, lex: &Lexicon, poly: &Tree
         return false;
     }
     if ws.i16(0) > 0 {
-        copy_morphs(ws, wa, n, poly);
+        copy_morphs(ws, wa, n, poly, lex.era.is_2009());
     }
     true
 }

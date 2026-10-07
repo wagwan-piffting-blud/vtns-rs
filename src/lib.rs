@@ -3,8 +3,10 @@
 
 pub mod bank;
 pub mod engine;
+pub mod engine09;
 pub mod engine_spa;
 pub mod json;
+pub mod era;
 pub mod lang;
 pub mod lexicon;
 pub mod ling;
@@ -16,6 +18,7 @@ pub mod prosody_tables_spa;
 pub mod shorten;
 pub mod text;
 pub mod text_spa;
+pub mod tree2;
 pub mod tree3;
 pub mod unitsel;
 pub mod wave;

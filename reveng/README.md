@@ -1,137 +1,126 @@
-# VoiceText Paul (vt_eng.dll): Reverse Engineering Summary
+# VoiceText reverse engineering: index
 
-`vtpaul` is a native, zero-dependency Rust reimplementation of the VoiceText English TTS engine
-(`vt_eng.dll` 3.11.7.1, the "Paul M16 FILEIO" build — Voiceware Co., Ltd.'s VoiceText, sold in the
-US as NeoSpeech; the DLL's version resource reads "Copyright 2000-2013 Voiceware Co., Ltd.") that
-reproduces the engine's output **bit for bit** and runs on Linux (musl, amd64/arm64/armv7/armv6) as
-well as Windows.
+`vtpaul` is a zero-dependency Rust reimplementation of the VoiceText English and Spanish TTS engines
+(Voiceware Co., Ltd.; sold in the US as NeoSpeech). It reproduces the engines' output bit for bit, raw
+text to WAV, and runs on Windows, macOS (arm64, x86_64) and Linux (musl; amd64, arm64, armv7, armv6).
 
-Engine install: `C:\Program Files (x86)\NWSPaulNumber2` (voice data `data-paul\M16`, language data
-`data-common`). All addresses in every doc here are VAs in `vt_eng.dll`, image base `0x10000000`,
-32-bit VC6 `__cdecl`. Ghidra renames use a per-stage prefix: `fe_` front end (shared by the text and
-linguistic stages), `dict_` lexicon, `pro_` prosody, `us_` unit selection, `wav_` waveform;
-everything else is `FUN_<address>`.
+This directory is the stable reference. Stage docs hold the byte-level detail and algorithms; the
+other docs link into them instead of repeating tables.
 
-This document is the index. The four stage docs below are the source of truth for byte-level detail
-and asm-derived algorithms; this one and its three siblings (`README_TECHNICAL.md`,
-`DLL_ANALYSIS.md`, `EXPERIMENTS.md`) link into them rather than duplicating their tables. This
-`reveng/` directory is the stable reference; day-to-day project state (who owns what, what's
-unfinished, in-flight agent coordination) is kept outside this repository.
+## Docs
 
-## The pipeline
+| Doc | Content |
+|---|---|
+| [FRONTEND_TEXT.md](FRONTEND_TEXT.md) | Text front end: tokenizer, normalizer chain, VTML, fullwidth map, user dictionary |
+| [FRONTEND_LING.md](FRONTEND_LING.md) | Linguistic front end: lexicon lookup, tagging, morphology, WA to SS merge, syllables, breaks, phone contexts |
+| [LEXICON.md](LEXICON.md) | `dict-eng` hash dictionaries, payload formats, `exceptdict`, `*.txt2` |
+| [PROSODY.md](PROSODY.md) | Duration/F0/tone CART trees, rate seeding, VTML spans, pause resolution, target features |
+| [UNITSEL.md](UNITSEL.md) | Unit database as selection sees it, back-off lattice, target/join cost, Viterbi, beam pruning |
+| [WAVEFORM.md](WAVEFORM.md) | Unit records, Shorten decode, join smoother, OLA/PSOLA, output formats, sync, lip-sync log |
+| [VIOLETA.md](VIOLETA.md) | Spanish engine (Violeta 2013 and the 2009 build): per-stage differences from English |
+| [OLD_PAUL.md](OLD_PAUL.md) | The 2009 engines (Paul09, Julie09, Violeta09): formats and per-stage differences from 2014 |
+| [README_TECHNICAL.md](README_TECHNICAL.md) | Byte maps of every on-disk file format the 2014 English engine reads |
+| [DLL_ANALYSIS.md](DLL_ANALYSIS.md) | Function inventory of `vt_eng.dll` by stage, with Rust counterparts |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | Parity runs, negative controls and fixes per stage |
+
+## Conventions
+
+- Addresses are VAs in the DLL under discussion. `vt_eng.dll` (3.11.7.1, "Paul M16 FILEIO") has image
+  base `0x10000000`, 32-bit VC6, `__cdecl`. Default engine install:
+  `C:\Program Files (x86)\NWSPaulNumber2` (voice data `data-paul\M16`, language data `data-common`).
+- Ghidra rename prefixes: `fe_` front end (text and linguistic), `dict_` lexicon, `pro_` prosody,
+  `us_` unit selection, `wav_` waveform. `FUN_<address>` is unrenamed.
+- Evidence tags in stage-doc headers: `[D]` decompile/disassembly, `[E]`/`[C]`/`[P]` verified on
+  captures or by the port, `[I]` inferred. Not fully uniform across docs; check each header.
+
+## Pipeline
 
 ```
 text
-  │  VT_TextToBuffer_ENG / VT_TextToFile_ENG / VT_TextToPreprocessInfoFile_ENG
-  ▼
-┌─────────────────────┐   fe_InitialTextProcess (once per request): VTML tag extraction,
-│  Text front end      │   fullwidth-char mapping, orig↔processed offset maps.
-│  (per sentence)      │   fe_NextSentence loop: fe_AnalyzeSentence → fe_NormalizeTokens,
-│  FRONTEND_TEXT.md    │   a ~20-normalizer chain (punctuation, currency, date, time, units,
-└──────────┬───────────┘   digits, address, numword, compound, ...) building the WA
-           │ WA (normalized word array, per sentence)
-           ▼
-┌─────────────────────┐   fe_LinguisticAnalysis: fe_TagAndPronounce (lexicon lookup, morphology,
-│  Linguistic front end│   the wh-question flag, function-word tagging) → the merge back into the
-│  FRONTEND_LING.md    │   WA (word-record character offsets, remapped to the original input by
-└──────────┬───────────┘   fe_NextSentence) → fe_BuildWordPhoneRecords / fe_AssignPhraseBreaks
-           │ SS (sentence structure: word/phone/syllable records)   (syllabify + CART breaks) / fe_BuildPhoneContexts
-           ▼
-┌─────────────────────┐   Per-word rate seeding + VTML span application, then CART-tree
-│  Prosody              │   duration/F0/tone prediction (durations never reach the waveform --
-│  PROSODY.md           │   they only feed target cost below), sentence/word pause resolution.
-└──────────┬───────────┘
-           │ predicted durations, F0 contours, target features, pause samples
-           ▼
-┌─────────────────────┐   Per phrase: build targets (whole-phone or half-phone), a context
-│  Unit selection       │   back-off lattice over 580,474 units, target cost + join cost,
-│  UNITSEL.md           │   Viterbi + beam pruning, backtrack.
-└──────────┬───────────┘
-           │ chosen unit ids per target
-           ▼
-┌─────────────────────┐   Unit + pause records, Shorten decoding, join smoothing, OLA/PSOLA,
-│  Waveform              │   emphasis filter, output-format encoding (raw/WAVE/AU/G.711/DADPCM),
-│  WAVEFORM.md           │   word/phone sync ring, lip-sync log.
-└──────────┬───────────┘
-           ▼
-        PCM / file / buffer
+  | fe_InitialTextProcess (once per request): VTML tags, fullwidth map, offset maps
+  v
+Text front end  [FRONTEND_TEXT.md]      per sentence: tokenize, ~20-normalizer chain -> WA
+  v
+Linguistic front end  [FRONTEND_LING.md, LEXICON.md]
+                                        lexicon/morphology/tagging, merge -> SS: word, phone, syllable records;
+                                        syllabify, phrase breaks, 7-byte phone contexts
+  v
+Prosody  [PROSODY.md]                   rate seeding, VTML spans, CART duration/F0/tone, pauses
+  v
+Unit selection  [UNITSEL.md]            targets, back-off lattice, target+join cost, Viterbi, beam
+  v
+Waveform  [WAVEFORM.md]                 Shorten decode, join smoothing, OLA/PSOLA, emphasis, formats, sync
+  v
+PCM / file / buffer
 ```
 
-Every stage above is **bit-exact** against the real engine on its own test corpus (see each stage
-doc's own parity section, and `EXPERIMENTS.md` for the collected dated results). End to end,
-raw text to WAV, the port matches the engine byte for byte on all 2741 test texts, on 1280 more
-under non-default pitch/rate/volume/pause settings, and for all four English voices (Paul, Kate,
-Julie, James) against both the 32-bit `vt_eng.dll` and the 64-bit voice DLLs.
+Durations never reach the waveform directly; they only feed the target cost.
+
+## Builds reproduced
+
+| Build | Engine DLL | Data | Era in code |
+|---|---|---|---|
+| 2014 English, Paul/Kate/Julie/James, x86 | `vt_eng.dll` 3.11.7.1 (voice name patched per voice) | `ver.2013` index, tree3 | `Era::V2014` |
+| 2014 English, same four voices, x64 | `vt_pau/vt_kat/vt_jul/vt_jam.dll` | same banks | `Era::V2014`, `Engine::set_x64` / CLI `--x64` |
+| Violeta 2013 (Spanish) | `vt_spa_violeta16.dll` | `ver.2013`, tree3 | `Era::V2014`, `Lang::Spa` |
+| Paul09 | `vt_eng_paul16.dll` (2009-09-15) | `ver.2009`, `.tree2` | `Era::Paul09` |
+| Julie09 | `vt_eng_julie16.dll` (Dec 2009) | `ver.2009`, tree3 | `Era::Julie09` |
+| Violeta09 | `vt_spa_violeta16.dll` (Dec 2009) | `ver.2005` header, tree3 | `Era::Violeta09` |
+
+`Era::detect` (`src/era.rs`) picks the build from the bank header and tree layout. x64 differs from x86
+only in single-precision float evaluation in unit selection (see [UNITSEL.md](UNITSEL.md)). The 2009
+builds differ in index layout (5-byte labels), word-record layouts, text and linguistic rules, selector
+and wave details; each stage doc has a "2009 builds" section.
+
+## Status
+
+Every stage is bit-exact against the real engine on its capture corpus. End to end, raw text to WAV:
+
+| Build | Result |
+|---|---|
+| 2014 English (`speak_parity`) | 2741/2741 texts; 1280 more under non-default pitch/rate/volume/pause |
+| 2014 English, all four voices, x86 and x64 (`voices_parity`) | bit-exact |
+| Violeta 2013 (`speak_spa_parity`) | 1327/1327 WAVs (2026-09-29) |
+| Paul09, Julie09 (`speak_old_parity`) | 2741/2741 each (2026-10-05) |
+| Violeta09 (`speak_old_parity`) | 1366/1366 (2026-10-05) |
+
+Open, not blocking: Spanish lip-sync log; `.his` selection history on 2009 engines (no capture).
 
 ## Repository layout
 
 | Path | Content |
 |---|---|
-| `src/text/` | Text front end port |
-| `src/ling/` | Linguistic front end port (`lookup.rs`, `tagger.rs`, `analysis.rs`, `morph.rs`, `funcwords.rs`, `merge.rs`, `words.rs`, `syllab.rs`, `breaks.rs`, `context.rs`, `mod.rs`, `tables.rs`) |
-| `src/lexicon.rs` | Hash-dict lookup, key encoding, payload decode (see `LEXICON.md`) |
-| `src/prosody.rs` | Prosody port |
-| `src/unitsel.rs`, `src/classes.rs` | Unit selection port |
-| `src/wave.rs`, `src/formats.rs` | Waveform + output-format port |
-| `src/engine.rs` | End-to-end wiring (text → ling → prosody → unitsel → wave), `vtpaul speak` CLI |
-| `src/bank.rs`, `src/shorten.rs` | Unit bank export/decode |
-| `tests/*_parity.rs` | Per-stage parity test suites, one per stage doc below |
+| `src/text/`, `src/text_spa/` | Text front ends |
+| `src/ling/`, `src/ling_spa/`, `src/lexicon.rs` | Linguistic front ends, lexicon |
+| `src/prosody.rs`, `src/prosody_spa.rs`, `src/tree2.rs`, `src/tree3.rs` | Prosody, CART trees |
+| `src/unitsel.rs`, `src/unitsel09.rs`, `src/classes.rs` | Unit selection |
+| `src/wave.rs`, `src/formats.rs` | Waveform, output formats |
+| `src/bank.rs`, `src/shorten.rs`, `src/era.rs` | Unit bank, Shorten, build detection |
+| `src/engine.rs`, `src/engine09.rs`, `src/engine_spa.rs` | End-to-end wiring, `vtpaul speak` CLI |
+| `tests/*_parity.rs` | Parity suites, one or more per stage and build |
 
-The Frida capture harness, the DLL-table generators, the corpus generators, and the Ghidra
-decompile/disassembly dumps used while building these notes are not part of this repository.
+The Frida capture harness, table generators, corpus generators and Ghidra dumps are not in this
+repository. Parity suites skip when their captures are missing.
 
-## The stage docs
-
-| Doc | Covers | Status |
-|---|---|---|
-| [`FRONTEND_TEXT.md`](FRONTEND_TEXT.md) | Tokenizer, the ~20-normalizer chain, VTML/fullwidth handling, user dictionary | **Bit-exact**, every normalizer, on the full test corpus |
-| [`FRONTEND_LING.md`](FRONTEND_LING.md) | Lexicon lookup + homograph tagging, morphology, the wh-question flag, function-word tagging, the WA↔SS merge (`fe_LinguisticAnalysis`), syllabification, phrase breaks, phone contexts | **Bit-exact**, every stage, on the full test corpus |
-| [`LEXICON.md`](LEXICON.md) | The `dict-eng` hash dictionaries, perfect-hash algorithm, lexicon/TPP payload formats, `exceptdict`, `*.txt2` tables | **Fully decoded and verified** |
-| [`PROSODY.md`](PROSODY.md) | Duration/F0/tone CART trees, syllabification's prosody-relevant fields, rate seeding, VTML span application, pause resolution, target features | **Bit-exact** |
-| [`UNITSEL.md`](UNITSEL.md) | Unit database as unit selection sees it, target building, context back-off lattice, target/join cost, Viterbi, beam pruning, `.his`/`.dtt` | **Bit-exact** |
-| [`WAVEFORM.md`](WAVEFORM.md) | Unit/pause records, Shorten decode, join smoother, OLA/PSOLA, emphasis, all output formats, word/phone sync, lip-sync log | **Bit-exact** |
-| [`VIOLETA.md`](VIOLETA.md) | Spanish engine (`vt_spa_violeta16.dll`): function map, struct layouts, letter-to-sound, lexicon/TPP, words/breaks/contexts, prosody, unit selection, wave | **Bit-exact** per stage from WA to PCM and for the initial text pass; normalizers 94.7% of records; end to end 1032/1327 WAVs identical (2026-09-29) |
-| [`OLD_PAUL.md`](OLD_PAUL.md) | The 2009 Paul build and database vs the 2014 target: builds, data formats (ver.2009 unit index, `.tree2`), function-level diff | Inventory only; not ported |
-
-Each stage doc states its own evidence tags in its header (typically `[D]` decompile/disassembly,
-`[E]`/`[C]`/`[P]` verified against captures or the port itself, `[I]` inferred) — they aren't fully
-standardized across docs written by different agents/sessions, so check the header of whichever one
-you're reading.
-
-## How to reproduce everything
-
-Run from the repository root:
+## Reproduce
 
 ```powershell
 cargo build --release
-cargo test --release          # every *_parity.rs suite in one run
+cargo test --release
 ```
 
-Each parity suite compares the port's output against captured ground truth recorded from the real
-engine (per-stage JSON/WAV captures keyed by corpus name); a suite skips cleanly rather than failing
-when its captures aren't present. The capture harness that produces them is a Frida-based tool that
-hooks `vt_eng.dll` and records its intermediate state and output for a fixed corpus of test
-sentences per stage — it is not part of this repository. Recapturing is deterministic and the
-resulting audio matches the engine's own `VT_TextToFile_ENG` output bit for bit. Targeted live
-tracing (hooking a narrower set of call sites) was used whenever a decompile alone was ambiguous —
-VC6 stack-slot reuse and pointer-difference-cancellation idioms are common in this binary — every
-stage doc has at least one example of live-tracing settling a question the decompile alone couldn't;
-see `EXPERIMENTS.md`.
+Captures come from a Frida harness that hooks the real DLL and records intermediate state and output
+for a fixed corpus per stage. Narrow live traces settled questions the decompile could not
+(VC6 stack-slot reuse, pointer-difference idioms).
 
-Ghidra MCP (port 8667) holds the project's own analysis of `vt_eng.dll` for anyone continuing the
-reverse-engineering; ask the user to have it open.
+Rules every stage followed:
 
-## Rules every bit-exact stage followed
-
-- Port from the decompile (or, where VC6 folds the pointer arithmetic past readability, the
-  disassembly), then prove it on captures. Reproduce engine quirks and bugs; don't fix them.
-- Extract DLL tables with a `pefile`-based generator script (not part of this repository) that reads
-  them straight out of the DLL into `src/<stage>_tables.rs`. Never transcribe a table by hand.
-- The engine's float math is x87 (VC6): 53-bit precision, `FSTP dword`/`FSTP qword` store points,
-  `__ftol` truncation. Match it store by store — the Rust port computes in `f64` and rounds to `f32`
-  exactly where the disassembly shows a 4-byte store.
+- Port from the decompile, or the disassembly where VC6 hides the pointer arithmetic; prove on captures.
+  Reproduce engine quirks and bugs.
+- Read DLL tables with a `pefile` generator into `src/*_tables.rs`; never transcribe by hand.
+- The engine's float math is x87: 53-bit precision, `FSTP dword/qword` store points, `__ftol` truncation.
+  The port computes in `f64` and rounds to `f32` where the disassembly stores 4 bytes.
 - Zero crate dependencies. 4-space indent, K&R braces.
-- Frida spawns need a timeout and a kill-on-close job object; cap parallel spawns around 12 — this
-  was the empirically reliable limit found while building the capture harness used for the parity
-  fixtures.
-- No heredocs in any shell. Write scripts to files and run them.
+- Frida spawns need a timeout and a kill-on-close job object; about 12 parallel spawns is the
+  reliable limit.
+- Ghidra MCP (port 8667) holds the analysis of `vt_eng.dll`; ask for it before continuing the reverse engineering.

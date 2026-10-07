@@ -14,6 +14,9 @@ use std::io;
 use std::path::Path;
 
 use crate::bank::Bank;
+use crate::engine09;
+use crate::era::Era;
+use crate::lang::Lang;
 use crate::lexicon::Lexicon;
 use crate::ling::{self, wr, Ss, Tib, Wa, WordStrings, Ws};
 use crate::prosody::{self, Trees};
@@ -477,6 +480,7 @@ pub struct Engine {
     pub chan: Channel,
     /// Match the 64-bit voice DLLs instead of the 32-bit vt_eng.dll (see `Selector::x64`).
     pub x64: bool,
+    pub era: Era,
 }
 
 impl Engine {
@@ -496,13 +500,20 @@ impl Engine {
         let common = data_root.join("data-common");
         let dict = common.join("dict-eng");
         let bank = Bank::open(&m16)?;
-        let cls = Classes::build(&bank);
+        let era = Era::detect(&bank, &m16, Lang::Eng)?;
         let cep = CepDist::load(&m16.join("ttsdata").join("dist_tbl").join("cepdist.tbl"))?;
         let sd = ScalarDist::build();
-        let trees = Trees::load(&m16.join("ttsdata").join("tree3"))?;
-        let lex = Lexicon::open(&dict)?;
-        let fe = text::Fe::load(&common)?;
-        Ok(Engine { bank, cls, cep, sd, trees, lex, fe, chan: Channel::default(), x64: false })
+        let (cls, trees, lex, fe) = if era.is_2009() {
+            let trees = if era == Era::Paul09 {
+                Trees::load_tree2(&m16.join("ttsdata").join("tree"))?
+            } else {
+                Trees::load(&m16.join("ttsdata").join("tree3"))?
+            };
+            (Classes::build_era(&bank, era), trees, Lexicon::open_era(&dict, era)?, text::Fe::load_era(&common, era)?)
+        } else {
+            (Classes::build(&bank), Trees::load(&m16.join("ttsdata").join("tree3"))?, Lexicon::open(&dict)?, text::Fe::load(&common)?)
+        };
+        Ok(Engine { bank, cls, cep, sd, trees, lex, fe, chan: Channel::default(), x64: false, era })
     }
 
     /// `VT_SetPitchSpeedVolumePause_ENG` / `VT_SetCommaPause_ENG` /
@@ -524,7 +535,7 @@ impl Engine {
     /// overrides are only as good as `war::PAUSE` in the WA the text stage
     /// produced; `speak` is only as exact as that stage.
     pub fn text_to_sentences(&self, text: &[u8]) -> Vec<SentenceInput> {
-        let ini = text::initial::initial(text);
+        let ini = if self.era.is_2009() { text::initial::initial_era(text, self.era) } else { text::initial::initial(text) };
         let processed = text::padded(&ini.processed);
         let mut cursors = [0usize; 2];
         text::sentences(&self.fe, &processed)
@@ -568,10 +579,16 @@ impl Engine {
         trace: &mut Vec<wave::RecTrace>,
     ) -> io::Result<()> {
         let nw = ss.n_words();
-        let mut u_words = ss_to_unitsel_words(ss);
-        let words = ss_word_info(ss, input);
+        let era = self.era;
+        let lay = ling::lay::Lay::of(era);
+        let (mut u_words, words, sent_type) = if era.is_2009() {
+            (engine09::ss_to_unitsel_words09(era, ss), engine09::ss_word_info09(era, ss, input), engine09::sentence_type09(era, ss))
+        } else {
+            (ss_to_unitsel_words(ss), ss_word_info(ss, input), ss.u8(ling::SS_TYPE))
+        };
+        // Non-final phrases select with the declarative type: 5 in 2014, 4 in the 2009 builds.
+        let mid_type = if era.is_2009() { 4 } else { 5 };
         let np = ss.n_phrases();
-        let sent_type = ss.u8(ling::SS_TYPE);
         let mut pause_st = PauseState {
             word_pauses: tib.pause[..=nw.min(tib.pause.len() - 1)].to_vec(),
             cont_flag: *cont,
@@ -579,21 +596,27 @@ impl Engine {
             ch_pitch: self.chan.pitch,
             ch_volume: self.chan.volume,
             ch_comma_ms: self.chan.comma_ms,
-            word0_start: if nw > 0 { ss.i32(Ss::word(0) + wr::START) } else { 0 },
+            word0_start: if nw > 0 { ss.i32(lay.word(0) + lay.start) } else { 0 },
             span_reset: None,
         };
         let mut first = 0usize;
         for g in 0..np {
             let e = Ss::phrase(g);
             let nwp = ss.i16(e + 2).max(0) as usize;
-            let ftype = if g + 1 == np { sent_type } else { 5 };
+            let ftype = if g + 1 == np { sent_type } else { mid_type };
             let r = sel.select_phrase(&mut u_words, first, nwp, ftype);
             let targets = phrase_wave_targets(&self.bank, &r)?;
-            let center = |w: usize, k: usize| -> u8 { ss.u8(Ss::word(w) + wr::CTX + 7 * k + 2) };
+            let center = |w: usize, k: usize| -> u8 {
+                if era.is_2009() {
+                    engine09::center09(era, ss, w, k)
+                } else {
+                    ss.u8(Ss::word(w) + wr::CTX + 7 * k + 2)
+                }
+            };
             let recs = wave::build_records(&targets, &words, &center, first as u16, g + 1 == np, &mut pause_st);
             let halves: Vec<u8> = r.targets.iter().map(|t| t.half).collect();
             let phrase_input = PhraseInput { records: &recs, uids: &r.uids, halves: &halves };
-            wave::generate_phrase_traced(win, &self.bank, &phrase_input, out, Some(trace))?;
+            wave::generate_phrase_traced_era(win, &self.bank, &phrase_input, out, Some(trace), era)?;
             first += nwp;
         }
         *cont = pause_st.cont_flag;
@@ -616,7 +639,12 @@ impl Engine {
     /// `resolve_word0_pause`'s doc for how this was reversed (live
     /// `vtprobe.exe` tracing, not just the decompile).
     pub fn synth_from_wa_traced(&self, sentences: &[SentenceInput]) -> io::Result<(Vec<i16>, Vec<usize>)> {
-        let mut sel = Selector::new(&self.bank, &self.cls, &self.cep, &self.sd);
+        let era = self.era;
+        let mut sel = if era.is_2009() {
+            Selector::new_era(&self.bank, &self.cls, &self.cep, &self.sd, era)
+        } else {
+            Selector::new(&self.bank, &self.cls, &self.cep, &self.sd)
+        };
         sel.x64 = self.x64;
         sel.reset();
         let mut win = DecodeWindow::default();
@@ -625,10 +653,15 @@ impl Engine {
         let mut cont = true;
         let mut cursor = 0i32;
         for input in sentences {
-            let Some((wa, mut ss, mut tib)) = run_ling(&self.lex, input, cursor) else { continue };
+            let ling = if era.is_2009() { engine09::run_ling09(era, &self.lex, input, cursor) } else { run_ling(&self.lex, input, cursor) };
+            let Some((wa, mut ss, mut tib)) = ling else { continue };
             cursor += wa.consumed();
             resolve_word0_pause(&mut tib, &self.chan, cont, input.captured);
-            run_prosody(&self.trees, &mut ss);
+            if era.is_2009() {
+                engine09::run_prosody09(era, &self.trees, &mut ss);
+            } else {
+                run_prosody(&self.trees, &mut ss);
+            }
             self.synth_sentence(&mut sel, &ss, &tib, input, &mut cont, input.final_pause, &mut out, &mut win, &mut trace)?;
         }
         let ends = wave::chunk_ends(&trace, out.len());
