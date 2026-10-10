@@ -152,7 +152,8 @@ fn tag_string(sl: &[Slot]) -> Vec<u8> {
 }
 
 fn pattern_ok(tags: &[u8]) -> bool {
-    if tags == b"N:N" {
+    // The 2009 tables add a bare "N", which goes through the same phrase gate as "N:N".
+    if tags == b"N:N" || tags == b"N" {
         return false;
     }
     let n = PATTERNS.count();
@@ -253,7 +254,7 @@ fn emit_time(wa: &mut Wa, sl: &[Slot]) -> bool {
         }
     }
     if let Some(z) = zone {
-        if !wa.emit(ZONE_TAB.field(z.idx, 0x10), z.start, z.end, 0x41, 0x44, 5) {
+        if !wa.emit_split(ZONE_TAB.field(z.idx, 0x10), z.start, z.end, 0x41, 0x44, 5) {
             return false;
         }
     }

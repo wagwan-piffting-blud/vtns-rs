@@ -313,8 +313,14 @@ N:N NUmD NUD NUm NmD NU Nm`. All accepted except bare `N:N` (index 11), which th
 minute words), pair-read (`numwords::pairs`); seconds "and" + cardinal + "second(s)" (singular iff < 2); a
 duration unit gives "hour(s)"/"minute(s)" by first letter, pluralized by the hour slot ("3 hr" -> "three
 hours"); "o'clock" only for the `H:00:SS` shape. Hour/minute/second share one record span (hour start to last
-component end); am/pm, zone and unit each get their own token span. Tags: am/pm word `AS`, other words `AD`,
-numerals `DD`.
+component end); am/pm, zone and unit each get their own token span. The zone name is split at spaces into
+one record per word ("Eastern" "Standard" "Time", all on the zone's span). Tags: am/pm word `AS`, other words
+`AD`, numerals `DD`.
+
+**2009 builds.** Pattern table Paul09 `0x100952b0` (18: no `NmD`, adds `N`), Julie09 `0x100975e4` (19: adds
+`N`). Bare `N` goes through the same `FUN_100590f0` gate as `N:N` and is declined the same way. Paul09's zone
+table (`0x10083b08`) has 15 entries: no `MST`/`M.S.T`/`m.s.t` and no two-letter zones. So in Paul09, "5 PM EST"
+leaves `EST` as a plain word, while "5:45 PM EST" expands it.
 
 ### 5.6 `numexpr` (0x100420f0), class 0x17
 
@@ -601,3 +607,6 @@ Dedicated corpora: operators 39/39, currency 90/90, copyright 32/32, compound 27
 - 2026-09-24: city, street, state/zip, names, VTML, url, abbreviations, full re-ports of fraction/phone/numexpr: 100%.
 - 2026-09-24: `fe_InitialTextProcess` ported (1494/1494); spans-to-words wired; `speak_parity` 1522/1524.
 - 2026-10-05: Julie09/Paul09 text front end exact (fetext 2245/2245, 2264/2264); end to end 100% after a 14-text date/abbreviation fix round.
+- 2026-10-09: zone names split into one record per word (`emit_split`); "5:45 pm EST" had been one record
+  "Eastern Standard Time" (heard as "e a s t e r n" in a user report). No corpus line had a zone after a time. Probe
+  `corpus_fetext\timezones.txt` (148 lines) on 2014, Paul09, Julie09.

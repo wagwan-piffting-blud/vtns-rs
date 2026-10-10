@@ -131,6 +131,8 @@ normalizers), so they are separate builds. `fe_Tokenize` is 1.6 KB smaller than 
   `table09`.
 - Paul09 `norm_symbols` (`FUN_1004f790`): only `(` is handled in that branch, not `[`.
 - Year words (Paul09 `FUN_10036d10`, Julie09 `FUN_10036ec0`): values >= 10000 read digit-pair-wise.
+- Time (Paul09 `FUN_10052b60`): own pattern table without `NmD` and a 15-entry zone table, so "5 PM EST" keeps
+  `EST`; Julie09 adds a bare `N` pattern (declined like `N:N`). See FRONTEND_TEXT.md section 5.5.
 - VTML (`handle09`, `TAGS09`): five tag stacks (no kind 7), open marker `a2 fe`, 5 channels, 29-tag table
   0x1007a4e8; `partofsp` and `phoneme` consume their content, `x-ntsampa` is verbatim. The three voice-variant
   steps only write TextToPreprocessInfoFile dumps (no audio) and are not ported.
@@ -253,4 +255,6 @@ Harness: `harness\vtfmt_old.c` (`build_vtfmt_old.bat`, env-driven DLL/root/speak
 - 2026-10-05 01:20-01:55: prosody, waveform and unit selection ported bit-exact for all three builds.
 - 2026-10-05 02:40-03:38: English front ends (Julie09, Paul09) and Spanish front end (Violeta09) ported; engine wiring at 03:45.
 - 2026-10-05 05:05: text front end complete; end to end Paul09 2735/2741, Julie09 2733/2741, Violeta09 1366/1366.
+- 2026-10-09: time-pattern tables added to the Paul09/Julie09 table specs (a zone probe found Paul09 expanding
+  "5 PM EST"); `corpus_fetext\timezones.txt`, 148/148 on all three English builds.
 - 2026-10-05 05:55: 14 remaining texts fixed (date, abbreviations, `(`, year words); 100% end to end, asserted in the normal suite.
