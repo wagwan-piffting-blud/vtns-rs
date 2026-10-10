@@ -41,11 +41,13 @@ Without `-o` the audio is played. `--format` writes WAV (default), 8-bit WAV, A-
 
 ## Builds
 
-Prebuilt binaries for Windows, Linux (amd64, arm64, armv6, armv7) and macOS (signed and notarized) are on the releases page. To build from source:
+Prebuilt binaries for Windows (amd64, x86), Linux (amd64, arm64, armv6, armv7) and macOS (one universal binary for Apple silicon and Intel, signed and notarized) are on the releases page. To build from source:
 
 ```sh
 cargo build --release
 ```
+
+`build_targets.ps1` builds every target from Windows into `dist/`: Windows and Linux locally (static CRT, static musl via `rust-lld`, no cross toolchain), macOS by running `build_macos.sh` over ssh on the Mac. `-NoMac` skips macOS, `-Only <target>` builds one. `-Check` renders every voice, both engine generations, `--x64`, prosody and the encoders through every binary (Linux under WSL and `qemu-user`, both macOS slices on the Mac) and demands each output's SHA256 equal `windows-amd64`'s; it reads the voices from `../all_voices`. `-NoBuild -Check` checks what is already in `dist/`.
 
 ## How it works
 
