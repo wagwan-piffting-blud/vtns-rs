@@ -442,10 +442,54 @@ plain structs (`Sentence`, `Word`, `Syllable`, `TargetRef`, `SpanList`).
 | Julie09 | tree3; 5 tag stacks (no kind 7), rate kinds 0..2 (`apply_tag_spans_era`); BRK_GRAVE is not a final break (`is_final_break(era, b)`); target-feature duration code uses the whole phone's duration and the F0 list the target's own half flag (`target_feature_era`); pause-sample channel clamp 0..3 -> 3 (`clamp_channel`); 5-byte contexts |
 | Paul09 | as Julie09 on `.tree2` trees (`Trees::load_tree2`, 0x1c-byte tree structs, predictors take the root pointer); channel clamp 0..3 -> 1; emits `]` where 2014 emits `\` in some break positions |
 | Violeta09 | channel clamp 0 -> 0; context byte 4 decimal-coded; own phone tables (`*_SPA09`); no kind-7 pass |
+| Paul04 | 2005-03-31 `vt_eng.dll`, `.tree2` trees; word record 0x2fc, syllable 0x28 with code / position pointers; own phone tables; different F0 smoothing and span application (section "2004 build") |
 
 `Sentence::era` defaults to `V2014`. `clamp_channel` is implemented but not yet called by the engine. The three
 voice-variant steps of the 2009 driver only write TextToPreprocessInfoFile dumps and are not ported. See
 [OLD_PAUL.md](OLD_PAUL.md).
+
+## 2004 build (`Era::Paul04`, `vt_eng.dll` 2005-03-31, image base 0x10000000)
+
+Same pipeline, different layouts and two different algorithms. SS = `*(tib+0x48)`: `+0` phrases, `+2` words, phrase
+`g` at `+0x0c+0x10g` (words at `+0x0e`, syllables at `+0x10`, syllable array pointer at `+0x18`); word `i` at
+`+0x648+0x2fc*i`: `+4` syllable array, `+0xd4` syllable count (short), `+0xe8` unit entries, `+0xec` target list,
+`+0xf0` target count, `+0xf2` durations (shorts), `+0x174` 5-byte phone contexts, `+0x2fd` break. Syllable (0x28):
+`+0..2` b0 b1 b2, `+3` tone, `+4` F0[12], `+0x1c` pointer to its phone codes, `+0x20` pointer to its position codes,
+`+0x24` phone count (short). The pointers point into one contiguous per-word run, so the port keeps the 2009
+`first_phone` view (captured `contig` flags 60503/60503).
+
+| Function | 2004 | Notes |
+|---|---|---|
+| `pro_PredictDurations` / `pro_DurationFeatures` | 0x1000ef10 / 0x1000f160 | features and trees as Paul09; own tables `DAT_10069b04` (index), `DAT_10069ec4` (stress), `DAT_10066cc0` (props), generated into `prosody_tables_paul04.rs`; BRK_GRAVE is not final |
+| `pro_PredictPitch` / `pro_PitchFeatures` | 0x1000f6a0 / 0x1000f800 | as Paul09 |
+| `pro_SmoothF0AcrossSyllables` | 0x1000f3e0 | **new algorithm**, `smooth_f0_04` (below) |
+| `pro_SeedWordRates` | 0x1001a410 | seeds pitch / duration factor / volume: a leading tag's value (`tib+0x111e9b..9d` flag, value at `+0x111ea0..a8`) else the channel's; clamps 50..200, 25..200, 0..500 |
+| `pro_ApplyTagSpansToWords` | 0x1001a130 | `apply_tag_spans04` (below) |
+| sentence pause | inline in `fe_ProcessNextSentence` 0x1001d8d0 | `resolve_sentence_pause04`; no continuation term |
+| `pro_PauseSamples` | 0x100224f0 | `wave04::pause_samples04`; comma pause fixed at 0xc80 |
+
+Smoothing (per phrase, per adjacent syllable pair A, B of the phrase's contiguous syllable array, in place, so each
+pair reads the previous pair's output): floats `a[k]`, `b[k]` = the two F0[12]. `rms(x) = f32(sqrt(f32(x*x*0.5)))`;
+`m1` = median of `rms(a[5..12])`, `m2` = median of `rms(b[0..7])` (`FUN_1000f330`, sorted element 3 of 7),
+`avg = f32((m1+m2)/2)`, `r1 = f32(sqrt(avg/m1))`, `r2 = f32(sqrt(avg/m2))`, `d1 = f32((r1-1)/11)`,
+`d2 = f32((1-r2)/11)`. For `k = 0..12`, `n = k - 11`: `a[k] = f32((n*d1 + r1) * a[k])`,
+`b[k] = f32((n*d2 + 1) * b[k])`. Then the seam is replaced by a line from `a[5]` to `b[6]`:
+`a[5+j] = f32((b[6]-a[5])/13 * (j-13) + b[6])` for `j = 0..7` (reading the already rewritten `a[5]`), then
+`b[j] = f32((b[6]-a[5])/13 * (j-6) + b[6])`. Output `(short)(x + 0.5)` (`__ftol`, truncation). x87 runs at 53-bit
+precision: f64 arithmetic with f32 rounding at each 4-byte store. Phrases with one syllable are untouched.
+
+Span application: three rate kinds (pitch, speed, volume; ranges 50..200, 50..400, 0..500 as 2014) multiply
+instead of replace: for span `j`, words from the last filled one up to the first word starting at or after
+`pos[j]` become `clamp(prev * seed / 100)` with `prev = 100` for `j = 0` else `val[j-1]`; after the last span the
+rest take `clamp(seed * val[j] / 100)`. Pause and break spans (kinds 3, 4) set `arr[i]` for every word `i` whose gap
+(end of word `i-1`, or `tib+4` for word 0, up to its start) holds a position; the last one wins, no clamp. The
+speed array holds the duration factor `10000 / speed`, so a `<vt_speed=200>` span arrives as 50. The tag syntax of
+this build is `<vt_pitch=150>...</vt_pitch>`, `<vt_speed=N>`, `<vt_volume=N>`, `<vt_pause=ms>`, `<vt_break=N>`.
+
+Verification (2026-10-15, captures in `harness\out_prosody_paul04` and `out_vtml_paul04`):
+`prosody_paul04_parity` 2917 texts / 3764 sentences: durations 150452/150452, tones 60503/60503, raw F0
+60503/60503, smoothed F0 60503/60503. `rates_paul04_parity` 185 VTML texts: seeds 618/618, seeded arrays 272/272, span
+application 272/272 (152 with non-empty lists), sentence pauses 272/272.
 
 ## Verification
 
@@ -484,3 +528,4 @@ pause gaps, silences).
 - 2026-09-23: prosody stage ported bit-exact against the 2014 captures (durations, F0, spans, pauses, target features).
 - 2026-09-23: `cont_flag` sequencing found by live tracing while wiring the end-to-end engine.
 - 2026-10-05: 2009 prosody for Julie09, Paul09 and Violeta09 ported at 100%; tree2 predictions exact.
+- 2026-10-15: 2004 prosody (durations, tones, F0 with the new smoothing, VTML seeding / spans / sentence pause) ported at 100% on the first run of each stage.

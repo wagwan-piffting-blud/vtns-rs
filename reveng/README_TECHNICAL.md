@@ -215,9 +215,10 @@ Loader `fe_LoadUserDictCsv` (0x1005e330).
 Index `FUN_1005f040`: exchange-sorted by key length then key, with per-length first/last bounds. Search
 `FUN_1005e010` (case-sensitive `strncmp`) / `FUN_1005e1a0` (`strnicmp`): longest length first, bisect
 within it, and the match must end on a token boundary (`FUN_1005f840`, re-tokenizes in mode 0x17, accepts
-internal `.`, `'`, `-`). If any `A` entry exists, `fe_AnalyzeSentence` switches to the simplified
-tag-mode tokenizer (`FUN_1003e070`). The installed file has one `P` entry ("miles an hour" `[CI]`), so
-the switch does not fire by default.
+internal `.`, `'`, `-`). An `A` target is stored as per-word phone codes joined by `\`, computed at load
+through the simplified normalizer `FUN_1003e070` and the linguistic front end (FRONTEND_TEXT.md section 6).
+The installed 2014 file has one `P` entry ("miles an hour" `[CI]`); the 2009 Paul and Julie installs ship
+nine `A` entries.
 
 ## 5. Builds
 

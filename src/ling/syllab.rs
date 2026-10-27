@@ -49,12 +49,12 @@ fn legal_onset(t: &PhTabs, arr: &[i32], from: i32, to: i32) -> bool {
 
 /// Result of `FUN_10013f30` for one group: `(a, b, c, d)` per syllable =
 /// nucleus, onset start, coda end (1-based phone positions) and stress.
-struct SylPlan {
-    n: i32,
-    syl: Vec<[i32; 4]>,
+pub(crate) struct SylPlan {
+    pub(crate) n: i32,
+    pub(crate) syl: Vec<[i32; 4]>,
 }
 
-fn plan(t: &PhTabs, idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
+pub(crate) fn plan(t: &PhTabs, idx: &[u8], stress: &[u8], n: i32) -> SylPlan {
     if n > 0x41 {
         return SylPlan { n: 0, syl: Vec::new() };
     }

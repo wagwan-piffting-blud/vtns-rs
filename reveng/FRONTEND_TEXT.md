@@ -30,7 +30,7 @@ VT_TextToBuffer_ENG  FUN_100200c0
     fe_AnalyzeSentence 0x1003d350
       FUN_1003e210: WA reset (0xe74 dwords from WA+0x14; tag-mode flag survives only when 1)
       every record pause (+0xc) := -1
-      fe_NormalizeTokens 0x1003d3d0       (FUN_1003e070 instead when the user dictionary holds alias entries)
+      fe_NormalizeTokens 0x1003d3d0       (FUN_1003e070 instead while the user dictionary loader resolves aliases)
       fe_LinguisticAnalysis 0x1003e240    see FRONTEND_LING.md
 ```
 
@@ -151,7 +151,7 @@ receives the one `symbols` left (mode 0x12).
 
 | # | VA | Name | Cont. | Class (+0x28) | Notes |
 |---:|---|---|---|---|---|
-| 0 | 0x1005deb0 | userdict (token class 1-3) | d772 | 0x19, `U`/`Y` | `P` entries; `A` aliases not reproduced |
+| 0 | 0x1005deb0 | userdict (token class 1-3) | d772 | 0x19, `U`/`Y` | `P` and `A` entries |
 | 1 | 0x10051a00 | punct_runs | own | | writes mode 1; sentence boundaries (5.1) |
 | 2 | 0x1004d990 | dispatch | own | | VTML content-tag dispatcher (token class 4 + `_strstr` delimiter), ~20 letter-keyed handlers; `norm_vtml.rs` |
 | 3 | 0x1003d290 | symbols_cp | d772 | | (c) "copyright", paragraph sign "paragraph" (class 6); takes every lone `0xa9` |
@@ -515,9 +515,19 @@ in `engttsdict_emb` first, else split per hyphen part ("summer-like", "Tri-State
 
 Loader `fe_LoadUserDictCsv` 0x1005e330: CSV lines `"source","target","type"[,"legacy"]`, type `A` (alias) or `P`
 (phones); keys trimmed, <= 49 bytes (`FUN_1005f2e0`); `[CI]` in the target puts the entry on the case-insensitive
-**I** list, else the **S** list. Alias targets are normalized at load through a temporary WA; with alias entries
-present `FUN_1005f2c0` makes `fe_AnalyzeSentence` use the tag-mode tokenizer `FUN_1003e070`. The installed
-dictionary has one `P` entry ("miles an hour" `[CI]`), so this does not apply.
+**I** list, else the **S** list. The installed 2014 dictionary has one `P` entry ("miles an hour" `[CI]`); the 2009
+Paul and Julie installs ship nine `A` entries ("voicetext" -> "voice text [CI]", "ABSlider" -> "<AB> Slider", ...).
+
+**Aliases** (`userdict.rs::check_alias`, `alias_words`, `text::alias_phones`). `FUN_1005f3b0` validates the
+target: trimmed; `[SKIP]` alone; else at most 10 blank-separated words of letters (a `-` between letters counts as
+a letter, a `<TAG>` of letters may be open once), <= 0x1e letters a word, <= 0x41 bytes, an optional trailing
+`[CI]` (cut off; selects the I list). Anything else (digits, punctuation, DBCS) drops the entry. The loader then
+runs `fe_AnalyzeSentence` on the target in a temporary WA with the user dictionary's flag (`+8`) at 0, which
+selects `FUN_1003e070`: words emitted `A`/`D` class 0x15, the letters of a `<...>` group `A`/`S`, a `[...]` group
+skipped, any other token ends the pass. `fe_LinguisticAnalysis` follows (lookup, morphology, merge), and the stored
+target is each record's phones (`+0x52`) joined by `\`, so "voicetext" emits two records, `V OY S` and
+`T EH K S T`. Normal text still goes through `fe_NormalizeTokens` after loading (verified with the 2009
+dictionaries on 2014, Paul09 and Julie09).
 
 Index `FUN_1005f040`: exchange-sorted by key length, then key; per-length first/last indexes. Search
 `FUN_1005e010` (S, `strncmp`) / `FUN_1005e1a0` (I, `strnicmp`): longest length first, bisect within a length; a
@@ -610,3 +620,6 @@ Dedicated corpora: operators 39/39, currency 90/90, copyright 32/32, compound 27
 - 2026-10-09: zone names split into one record per word (`emit_split`); "5:45 pm EST" had been one record
   "Eastern Standard Time" (heard as "e a s t e r n" in a user report). No corpus line had a zone after a time. Probe
   `corpus_fetext\timezones.txt` (148 lines) on 2014, Paul09, Julie09.
+- 2026-10-15: user-dictionary aliases ported (validator `FUN_1005f3b0`, load-time normalizer `FUN_1003e070`, phones
+  per word). The 2009 installs ship aliases; "Welcome to voicetext" had dropped the word. Probe
+  `corpus_fetext\aliases.txt` (20 lines) byte-identical WAVs on Paul09, Julie09 and 2014 with the 2009 dictionary.

@@ -9,6 +9,7 @@
 
 use super::cstr::*;
 use super::tokenize::{tokenize, Tok};
+use crate::era::Era;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -199,6 +200,148 @@ fn check_phones(t: &[u8]) -> Option<(u8, Vec<u8>)> {
     Some((if ci { b'I' } else { b'S' }, t[..cut].to_vec()))
 }
 
+/// `FUN_1005f3b0` on an 'A' target: trimmed, up to 10 blank-separated words of
+/// letters (a `-` between letters counts as one, a `<TAG>` of letters is
+/// allowed once open at a time), at most 0x1e letters a word and 0x41 bytes in
+/// all; `[SKIP]` alone, or a trailing `[CI]` (any case), which is cut off.
+/// Returns the list it belongs to and the cut target.
+fn check_alias(src: &[u8]) -> Option<(u8, Vec<u8>)> {
+    let mut a = 0;
+    let mut b = src.len();
+    while a < b && ws4(src[a]) {
+        a += 1;
+    }
+    while b > a && ws4(src[b - 1]) {
+        b -= 1;
+    }
+    if a == b {
+        return None;
+    }
+    let mut t = src[a..b].to_vec();
+    let len = t.len();
+    t.extend_from_slice(&[0, 0]);
+    if t[0] == b'[' {
+        return if stricmp(&t, b"[SKIP]") == 0 { Some((b'S', t[..len].to_vec())) } else { None };
+    }
+    let letter = |c: u8| cls(c) & 0xc0 != 0;
+    let (mut i, mut letters, mut words) = (0usize, 0, 0);
+    let (mut in_tag, mut ci) = (false, false);
+    loop {
+        let c = t[i];
+        let d = t[i + 1];
+        if (0xa0 < c && c < 0xae && 0xa0 < d && d != 0xff)
+            || (c == 0xfd && d == 0xfe && era() != Era::Paul09)
+            || (c == 0xae && 0xa0 < d && d < 0xc3)
+        {
+            return None;
+        }
+        let advance = if letter(c) {
+            letters += 1;
+            true
+        } else if i > 0 && letter(t[i - 1]) && c == b'-' && letter(d) {
+            letters += 1;
+            true
+        } else if !in_tag && c == b'<' && letter(d) {
+            in_tag = true;
+            true
+        } else if i > 0 && in_tag && letter(t[i - 1]) && c == b'>' {
+            in_tag = false;
+            true
+        } else if !in_tag && c == b'[' {
+            if stricmp(&t[i..], b"[CI]") != 0 {
+                return None;
+            }
+            t[i] = 0;
+            ci = true;
+            false
+        } else {
+            if c != b' ' || in_tag || letters > 0x1e {
+                return None;
+            }
+            words += 1;
+            if words >= 0xb {
+                return None;
+            }
+            letters = 0;
+            true
+        };
+        if advance {
+            i += 1;
+            if i > 0x41 {
+                return None;
+            }
+        }
+        if t[i] == 0 {
+            if letters > 0 {
+                words += 1;
+            }
+            if words >= 0xb || in_tag {
+                return None;
+            }
+            return Some((if ci { b'I' } else { b'S' }, t[..i].to_vec()));
+        }
+    }
+}
+
+/// `FUN_1003e070`, the normalizer `fe_AnalyzeSentence` runs while the user
+/// dictionary loads: words go out as-is (`A`/`D`), the letters of a `<...>`
+/// tag as `A`/`S`, a `[...]` group is skipped, any other token stops it.
+pub fn alias_words(wa: &mut super::wa::Wa, t: &[u8]) -> i32 {
+    let finish = |wa: &super::wa::Wa| if wa.n() < 1 { -1 } else { 1 };
+    let (mut p, mut off) = (0usize, 0i32);
+    loop {
+        while ws4(at(t, p as isize)) {
+            p += 1;
+            off += 1;
+        }
+        let mut x = Tok::default();
+        let mut r = tokenize(&mut x, t, p, off, 0, None);
+        if r == 0 || x.len == 0 {
+            return finish(wa);
+        }
+        if x.class == 3 {
+            let mut y = Tok::default();
+            if x.text[0] == b'<' {
+                if x.len != 1 {
+                    return -1;
+                }
+                loop {
+                    p += r as usize;
+                    off += r;
+                    r = tokenize(&mut y, t, p, off, 0, None);
+                    if r == 0 || (y.text[0] == b'>' && y.len == 1) {
+                        break;
+                    }
+                    if !wa.emit(&y.text, y.start, y.end, 0x41, 0x53, 0x15) {
+                        return 0;
+                    }
+                }
+            } else {
+                if x.text[0] != b'[' || x.len != 1 {
+                    return -1;
+                }
+                loop {
+                    p += r as usize;
+                    off += r;
+                    r = tokenize(&mut y, t, p, off, 0, None);
+                    if r == 0 || (y.text[0] == b']' && y.len == 1) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            if x.class != 1 {
+                return -1;
+            }
+            if !wa.emit(&x.text, x.start, x.end, 0x41, 0x44, 0x15) {
+                return 0;
+            }
+        }
+        p += r as usize;
+        off += r;
+    }
+}
+
 /// `FUN_1005f710`: blank-separated phone names (upper-cased) to codes, `#` to
 /// the word break 100, "TD" to 0x4d; at most 0x41 named phones.
 pub(crate) fn phones_to_codes(t: &[u8]) -> Option<Vec<u8>> {
@@ -226,9 +369,7 @@ impl UserDict {
     /// Load `userdict_eng.csv`. Returns None when the file holds no usable entry
     /// (the engine then runs without a user dictionary). 'P' targets are stored
     /// as phone codes (`FUN_1005f5c0`/`FUN_1005f710`); 'A' (alias) targets are
-    /// kept as text: the engine normalizes them at load time through
-    /// `fe_AnalyzeSentence`, which is not reproduced (the installed dictionary
-    /// has no alias entries).
+    /// kept as text until `resolve_aliases` turns them into phone codes.
     pub fn load(csv: &[u8]) -> Option<UserDict> {
         let mut all = Vec::new();
         for raw in csv.split(|&c| c == b'\n') {
@@ -258,13 +399,10 @@ impl UserDict {
                 };
                 (kind, codes)
             } else {
-                let upper_tgt: Vec<u8> = tgt.iter().map(|&c| upper(c) as u8).collect();
-                let ci = upper_tgt.windows(4).any(|w| w == b"[CI]");
-                let target = match tgt.iter().position(|&c| c == b'[') {
-                    Some(p) => tgt[..p].to_vec(),
-                    None => tgt.clone(),
+                let Some(r) = check_alias(tgt) else {
+                    continue;
                 };
-                (if ci { b'I' } else { b'S' }, target)
+                r
             };
             all.push(Entry { kind, key, target, is_alias: ty == b'A' });
         }
@@ -299,6 +437,19 @@ impl UserDict {
             s: if s_list.is_empty() { None } else { Some(List::build(s_list, false)) },
             i: if i_list.is_empty() { None } else { Some(List::build(i_list, true)) },
         })
+    }
+
+    pub fn has_aliases(&self) -> bool {
+        [&self.s, &self.i].iter().any(|l| l.as_ref().is_some_and(|l| l.entries.iter().any(|e| e.is_alias)))
+    }
+
+    /// The loader's alias pass: `phones` gives the target's per-word phone codes, joined by `\`.
+    pub fn resolve_aliases(&mut self, phones: &dyn Fn(&[u8]) -> Vec<u8>) {
+        for l in [&mut self.s, &mut self.i].into_iter().flatten() {
+            for e in l.entries.iter_mut().filter(|e| e.is_alias) {
+                e.target = phones(&e.target);
+            }
+        }
     }
 
     /// `FUN_1005e010`: longest case-sensitive entry matching at `t[p..]`.

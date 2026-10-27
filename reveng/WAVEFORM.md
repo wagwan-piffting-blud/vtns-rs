@@ -568,10 +568,52 @@ ported; the native engine hands PCM to its caller.
 | Julie09 | **no join smoother**: `FUN_10029c20` decodes (`FUN_1002a800`) and goes straight to overlap-add; unit records are a struct of arrays; channel clamp 0..3 (pause-sample clamp to 3); everything else (decode, OLA, PSOLA, pitch marks, record fill, pause samples, sync, lip-sync text, Hann table) matches 2014 apart from offsets |
 | Paul09 | as Julie09, channel clamp to 1 |
 | Violeta09 | as Julie09, channel clamp 0 |
+| Paul04 | no smoother, but the record builder, unmodified OLA and PSOLA are rewritten (section "2004 build", `src/wave04.rs`) |
 
 Port: `wave::generate_phrase_traced_era` (2009: no `smooth_joins`); the engine calls it with the 2009 era and passes
 centre index 1 of the 5-byte label to the record builder. All 13 formats and the lip-sync log are unchanged. See
 [OLD_PAUL.md](OLD_PAUL.md).
+
+## 2004 build (`Era::Paul04`, `src/wave04.rs`, `src/engine04.rs`)
+
+`wav_GeneratePhrase` 0x100203c0 (`wav_SelectAndGeneratePhrase` 0x10020350, `wav_FillChunk` 0x1001da20,
+`wav_NextChunkWithEmphasis` 0x1001dad0 with the same emphasis filter, factor at `spk+0x3830`, default 0). The unit
+records are a struct of arrays at `tib+0xe54a8` (`wav_BuildUnitRecords` 0x10020640): pos14 `+0x17f0`, len `+0x27e4`,
+unit-entry pointer `+0x37d8`, mode `+0x47cc`, upm `+0x4bd0`, n_pm `+0x5bc4`, ovl_l `+0x5fc2`, ovl_r `+0x67bc`, type
+`+0x6fb6`, word `+0x73b4`, phone `+0x83a8`, centre `+0x9b96`, pitch `+0x9f94`, duration factor `+0xaf88`, volume
+`+0xbf7c`, file `+0xff4`, count `+0xcf70` (at most 0x3fc; more makes the builder return 0 and leave the count). The
+unit entry is 0x14 bytes in the word (`+0xe8`): `pcm_pos`, `pm_pos`, half1 (short), half2, coded size, pm1, pm2,
+periods[3], file; the fill rules per mode are `Record::fill`'s. Targets are the 6-byte list at word `+0xec`
+(word, syl, phone, index, half, unvoiced); the half is the mode.
+
+- Pauses: `pro_PauseSamples` 0x100224f0 (`pause_samples04`): explicit `pause[w] << 4`, word 0 consumes the
+  continuation flag `tib+0x1132b8`, otherwise 11000 after `Z` / `^`, 0xc80 after `[`, else 0. Each non-zero pause
+  becomes **ten** silence records of `pause / 10` samples (word = the phrase's first word, centre `0x5a`), carrying
+  the channel's pitch, duration factor and volume; a silence plays `(len * dur + 50) / 100` zeros. There is no
+  trailing-pause record.
+- Channel: `VT_SetPitchSpeedVolumePause_ENG` stores pitch 50..200 (`+0x3828`), the duration factor
+  `10000 / speed` clamped 25..200 (`+0x3824`, speed itself at `+0x3820`), volume 0..500 (`+0x382c`), pause up to 20000
+  (`+0x3834`, default 687); defaults 100 / 100 / 100. `Channel04::apply`.
+- Decode: `wav_DecodeUnit` 0x10020de0 = `DecodeWindow::decode` (same persistent 10000-sample window, volume
+  `x * vol / 100` saturated).
+- Pitch and duration factor both 100: `wav_OlaUnitUnmodified` 0x10020f70 (`ola_unmodified04`). It copies
+  `len - ovl_r` samples (`len` for the last speech record before a silence or the phrase end); the first `tail`
+  samples are `f32(tail[j]*H[(t+j+1)(N-1)/(2t+1)] + src[j]*H[(j+1)(N-1)/(2t+1)])` clamped, with `t` the previous
+  record's saved tail length and `N = 8192` the Hann table (same table as 2014). The last `ovl_r` samples are the next
+  tail. `ovl_l` is not used.
+- Otherwise `wav_PsolaUnit` 0x100211b0 (`psola04`) with the epochs of `wav_BuildEpochTable` 0x10021950
+  (`[pos, left, right, dur factor, pitch]`; one mark gives `[0, m0 - 1, 1]`) and `wav_FindNearestEpoch` 0x10021a10
+  (target time `lim * 100 / dur factor`). Each epoch windows `left + right` samples with the Hann table
+  (`H[(i+1)*0x1fff/(2*left+1)]` rising, `H[(right-left+1+i)*0x1fff/(2*right+1)]` falling), places the grain by
+  `l = clamp(left*100/pitch, left/16, left*31/16)` and overlap-adds it (cases `l < left` and `l >= left`, with and
+  without the previous record's tail), and commits `op` samples (keeping the last `right` as the next tail) or
+  `lim` samples for the last speech record. No fade-out at a flush: the grain already ends in the falling window.
+- Chunks (`chunk_sizes04`): before each record, `(dur*len*2 + 50)/100 + 2000 + chunk_bytes > 60000` or
+  `len*2 + decoded_since_entry*2 > 60000` ends the chunk and re-enters at that record.
+
+Verification (2026-10-15): `wave_paul04_parity` PCM from captured records 420/420 (84 sweeps + 336 corpus x
+parameter combinations, chunk sizes included), records from the captured selection 960/960 phrases (43,168 records),
+selection to PCM 420/420, and the whole speak corpus (2909 texts) against `out_old/paul04`: 2909/2909 bit-exact.
 
 ## Verification
 
@@ -612,3 +654,4 @@ lip-sync log for every text and parameter set (1,288 files).
 - 2026-09-23: formats: fmt 9 (AU position-cache bug, 4-byte file) and fmt 3 (odd sample dropped) fixed: 1,196/1,196.
 - 2026-09-23: lip-sync log 0/92 until CRLF line endings, then 92/92.
 - 2026-10-05: 2009 waveform for Julie09, Paul09, Violeta09 (no smoother) bit-exact.
+- 2026-10-15: 2004 waveform (own record builder, OLA and PSOLA) bit-exact on the first run, 2909/2909 speak texts.

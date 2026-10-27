@@ -1,7 +1,8 @@
-# The 2009 engines (Paul09, Julie09, Violeta09)
+# The 2009 and 2004 engines (Paul09, Julie09, Violeta09, Paul04)
 
-Reference for the three 2009 VoiceText engine builds and their ports in `vtpaul-rs`. Each is bit-exact from raw
-text to PCM against the real 2009 DLL. The port reads the voice data, decides which build it belongs to
+Reference for the older VoiceText engine builds and their ports in `vtpaul-rs`: three 2009 builds and the 2004
+Paul build ([The 2004 engine](#the-2004-engine-paul04) at the end). Each is bit-exact from raw text to PCM
+against the real DLL. The port reads the voice data, decides which build it belongs to
 (`Era`) and runs that build's variant of every stage. The 2014 engines (English `vt_eng.dll` 3.11.7.1,
 Violeta 2013) are the baseline; this file lists what differs and where each difference lives. Stage details for
 2014 are in [PROSODY.md](PROSODY.md), [UNITSEL.md](UNITSEL.md), [WAVEFORM.md](WAVEFORM.md),
@@ -247,6 +248,55 @@ Harness: `harness\vtfmt_old.c` (`build_vtfmt_old.bat`, env-driven DLL/root/speak
 - `clamp_channel` is implemented per build but not yet called by the engine.
 - String constants in 2014-addressed text modules that no corpus exercises may still differ from 2009.
 
+## The 2004 engine (Paul04)
+
+| Build | DLL | Linked | Speaker | Index | Trees | License check |
+|---|---|---|---:|---|---|---|
+| Paul04 | `2004_paul\lib\vt_eng.dll` (581,632 B, VC6, 36 exports) | 2005-03-31 | 1 | `ver.2004` | tree2 | none exported |
+
+- Data: `ver.2004` has the `ver.2009` index layout byte for byte (19-byte primary record + 20 bytes of columns);
+  `Era::detect` picks `Paul04` from the version string alone. Trees are `.tree2` as in Paul09. `dict-eng` lists
+  have no `_sort` suffix; there is no tpp dictionary and no `wab.txt2`; `ENGBI_comp.tree2` ships but is never opened;
+  `city1.txt2`..`city4.txt2` hold city names by word count. The `.txt2` container has no count field (lines are
+  counted, `Txt2::open04`).
+- API: same signatures as 2014 (`TextToBuffer` 13 arguments; speed stored as `10000 / speed`), but no
+  `VT_SetCommaPause`, `VT_SetEmphasisFactor` or `VT_CheckLicense`: `--comma-pause` and `--emphasis` do nothing.
+- VTML: ten `<vt_*>` tags (`<vt_pitch=N>..</vt_pitch>`, `<vt_speed=N>`, `<vt_volume=N>`, `<vt_pause=ms>`,
+  `<vt_break=N>`, ...), stripped by the initial pass into five span lists; `<vtml_*>` tags are read aloud.
+- Same pipeline as 2014 at every stage, with other struct layouts (text record 0x88, morph 0x6c, word record
+  0x2fc, syllable 0x28) and three stages of a different design:
+  - Text front end (`src/text04/`): `fe_NormalizeTokens` (0x1004d720) reads tokens into a look-ahead buffer and
+    offers it to a fixed chain of recognizers (symbols, currency, URL, time, date, phone, digit codes, address,
+    ordinal, math, units, number words, symbols, abbreviations, letter codes) that consume any number of tokens
+    and queue their words; a failing recognizer rewinds the buffer. One module per recognizer
+    (`norm_*.rs`), tables generated from a `.rdata`/`.data` snapshot (`text04/tables.rs`).
+  - Unit selection (`src/unitsel04.rs`): an older design (`us_SelectUnitsForPhrase` 0x1001c100) with 30
+    candidates per target, an exact 6-byte class key and a 9-byte half-phone back-off, join cost = cepstral
+    distance + two class-distance terms weighted per boundary type + 0.2, target weight 0.1, mean-based beam pruning.
+  - Waveform (`src/wave04.rs`, `src/engine04.rs`): its own unit-record builder, overlap-add and PSOLA.
+- Linguistic front end (`src/ling04/`): own tagger, LTS (no short-word "E" rule), morphology and merge; breaks are
+  rule-based. Prosody: the Paul09 algorithm with 2004 tables
+  (`prosody_tables_paul04.rs`) and its own F0 smoothing (`smooth_f0_04`).
+- Glue: `engine04::front04` is `fe_NextSentence` (0x10019e70): word positions, rate seeds
+  (`pro_SeedWordRates` 0x1001a410) and tag spans (`pro_ApplyTagSpansToWords` 0x1001a130).
+  `Engine::open_voice` loads the 2004 front end and classes (`engine::Paul04`) and `speak` runs it.
+
+Verification (all asserted in the normal suite):
+
+| Stage | Test | Result |
+|---|---|---|
+| Raw text to PCM | `e2e_text_paul04_parity` | 2909/2909 against `out_old\paul04` |
+| Captured WA to PCM | `e2e_paul04_parity` | 2891/2891 (18 texts outside cp1252 skipped) |
+| Text front end | `fetext_paul04_parity` | initial 5067/5067; normalization 5067/5067 lines, 53749/53749 records |
+| Linguistic front end | `feling_paul04_parity`, `lts_paul04_parity`, `morph_paul04_parity` | lookup, copy, morph, analysis 5186/5186; tp and WA out 13871/13871; SS passes 5174/5174 |
+| Prosody, rates, tree2 | `prosody_paul04_parity`, `rates_paul04_parity`, `tree2_paul04_parse` | 100% |
+| Unit selection | `unitsel_paul04_parity` | 2909 captures, 164,160 targets, 0 mismatches |
+| Waveform | `wave_paul04_parity` | 2909/2909 PCM from captured selections |
+
+Open items: the say-as dispatcher `FUN_10043bb0` and its ten handlers are not ported; they only act on
+`<\xa1\xddX>` marker tokens, which no capture contains. Synthesis from captured WAs (`synth-wa`) is not wired for
+2004. The output formats other than 16-bit WAV are not verified against the 2004 DLL.
+
 ## History
 
 - 2026-09-28: inventory of the Paul 2009 install; the 2014 DLL and the port reject its data (tree2, `ver.2009`).
@@ -255,6 +305,12 @@ Harness: `harness\vtfmt_old.c` (`build_vtfmt_old.bat`, env-driven DLL/root/speak
 - 2026-10-05 01:20-01:55: prosody, waveform and unit selection ported bit-exact for all three builds.
 - 2026-10-05 02:40-03:38: English front ends (Julie09, Paul09) and Spanish front end (Violeta09) ported; engine wiring at 03:45.
 - 2026-10-05 05:05: text front end complete; end to end Paul09 2735/2741, Julie09 2733/2741, Violeta09 1366/1366.
+- 2026-10-05 05:55: 14 remaining texts fixed (date, abbreviations, `(`, year words); 100% end to end, asserted in the normal suite.
 - 2026-10-09: time-pattern tables added to the Paul09/Julie09 table specs (a zone probe found Paul09 expanding
   "5 PM EST"); `corpus_fetext\timezones.txt`, 148/148 on all three English builds.
-- 2026-10-05 05:55: 14 remaining texts fixed (date, abbreviations, `(`, year words); 100% end to end, asserted in the normal suite.
+- 2026-10-15: the 2009 Paul/Julie user dictionaries hold nine `A` aliases, which the port had never resolved
+  ("voicetext" was dropped). Aliases are now resolved at load; see FRONTEND_TEXT.md section 6.
+- 2026-10-15: assessment of the 2004 Paul install (data compatible, code different); prosody, unit selection
+  and waveform ported bit-exact from captures.
+- 2026-10-16: 2004 linguistic front end, then the text front end (recognizer chain) ported; raw text to PCM
+  2909/2909; CLI wired.

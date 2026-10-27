@@ -1144,7 +1144,7 @@ fn spell_test(lex: &Lexicon, ws: &Ws, idx: usize, sp: &[u8], src: &SpellSrc) -> 
 /// result value (only used by callers as a `strlen`-position start, which
 /// `camelcase_split` doesn't need) -- but always false for a `"Mac"`/`"Mc"`
 /// prefix (case-insensitive, `strnicmp`).
-fn is_mixed_case(word: &[u8]) -> bool {
+pub(crate) fn is_mixed_case(word: &[u8]) -> bool {
     if strnicmp(word, b"mac", 3) == 0 || strnicmp(word, b"mc", 2) == 0 {
         return false;
     }
@@ -1233,7 +1233,7 @@ fn split_camel_part(era: crate::era::Era, word: &[u8], pos: &mut usize) -> Vec<u
 /// julie09 `FUN_1000c350`: a part ends before any non-lowercase character that follows a lowercase one
 /// (state 'L'); after an uppercase character (state 'U') the next character always joins. `'s` before an
 /// uppercase letter joins the part, a bare `'` after an `s` is skipped.
-fn split_camel_part09(word: &[u8], pos: &mut usize) -> Vec<u8> {
+pub(crate) fn split_camel_part09(word: &[u8], pos: &mut usize) -> Vec<u8> {
     let n = word.len();
     let at = |i: usize| word.get(i).copied().unwrap_or(0);
     let c0 = at(*pos);

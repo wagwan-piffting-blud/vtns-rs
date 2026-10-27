@@ -108,7 +108,7 @@ impl Tab09 {
             Era::Julie09 => Some(Tab09::julie09()),
             Era::Paul09 => Some(Tab09::paul09()),
             Era::Violeta09 => Some(Tab09::viol09()),
-            Era::V2014 => None,
+            Era::V2014 | Era::Paul04 => None,
         }
     }
 

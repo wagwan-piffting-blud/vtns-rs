@@ -62,11 +62,17 @@ app_check() {
     printf '%s' "On 10/07/2026 the total was \$1,234.56; call 1-800-555-0199 or write to wx@example.gov." > "$work/p1.txt"
     printf '%s' "Hola a todos. El servicio meteorologico nacional ha emitido un aviso de tormenta severa." > "$work/p2.txt"
     fail=0
-    for c in paul:0 paul:1 kate:0 kate:1 julie:0 julie:1 james:0 james:1 violeta:2; do
+    for c in paul:0 paul:1 kate:0 kate:1 julie:0 julie:1 james:0 james:1 violeta:2 paul04:0 paul04:1; do
         v=${c%:*}
         i=${c#*:}
+        d=$data
+        voice=$v
+        if [ "$v" = paul04 ]; then
+            d="$data/2004_paul"
+            voice=paul
+        fi
         for s in $2; do
-            arch -$s "$1" --data "$data" --voice $v -o "$work/$s-$v-$i.wav" -f "$work/p$i.txt"
+            arch -$s "$1" --data "$d" --voice $voice -o "$work/$s-$v-$i.wav" -f "$work/p$i.txt"
         done
         if [ "$2" != "x86_64" ] && \
            [ "$(shasum -a 256 < "$work/arm64-$v-$i.wav")" != "$(shasum -a 256 < "$work/x86_64-$v-$i.wav")" ]; then

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VTNS</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav id="markup" aria-label="VTML tags">
+        <div class="menu" data-title="Pause"></div>
+        <div class="menu" data-title="Break"></div>
+        <div class="menu" data-title="Rate"></div>
+        <div class="menu" data-title="Pitch"></div>
+        <div class="menu" data-title="Volume"></div>
+        <div class="menu" data-title="Say As"></div>
+        <div class="menu" data-title="Word"></div>
+        <div class="menu" data-title="Phoneme"></div>
+    </nav>
+
+    <textarea id="text" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"
+              aria-label="Text to speak"
+              placeholder="Type or paste text. VTML tags in it act; the menus above insert them around the selection."></textarea>
+
+    <section id="controls">
+        <div class="row">
+            <label for="voice">Voice</label>
+            <select id="voice"></select>
+            <button type="button" id="voicesBtn" title="Choose the folder your VoiceText voices are in">Voices…</button>
+            <label class="check" id="x64Label" title="The 64-bit voice DLLs (vt_pau/vt_kat/vt_jul/vt_jam.dll) differ from the 32-bit vt_eng.dll on rare inputs">
+                <input type="checkbox" id="x64"> Sound like the 64-bit DLLs</label>
+        </div>
+        <div class="row">
+            <label for="rate">Rate</label>
+            <input type="range" id="rate" min="50" max="400" step="1">
+            <input type="number" id="rateN" min="50" max="400" step="1" aria-label="Rate value">
+            <span class="unit">%</span>
+        </div>
+        <div class="row">
+            <label for="pitch">Pitch</label>
+            <input type="range" id="pitch" min="50" max="200" step="1">
+            <input type="number" id="pitchN" min="50" max="200" step="1" aria-label="Pitch value">
+            <span class="unit">%</span>
+        </div>
+        <div class="row">
+            <label for="volume">Volume</label>
+            <input type="range" id="volume" min="0" max="500" step="1">
+            <input type="number" id="volumeN" min="0" max="500" step="1" aria-label="Volume value">
+            <span class="unit">%</span>
+        </div>
+        <div class="row">
+            <label for="pause">Sentence pause</label>
+            <input type="range" id="pause" min="0" max="3000" step="1">
+            <input type="number" id="pauseN" min="0" max="65535" step="1" aria-label="Sentence pause value">
+            <span class="unit">ms</span>
+        </div>
+        <div class="row">
+            <label for="comma">Comma pause</label>
+            <input type="range" id="comma" min="0" max="3000" step="1">
+            <input type="number" id="commaN" min="0" max="65535" step="1" aria-label="Comma pause value">
+            <span class="unit">ms</span>
+        </div>
+        <div class="row">
+            <label for="emphasis">Emphasis</label>
+            <input type="range" id="emphasis" min="-95" max="95" step="1">
+            <input type="number" id="emphasisN" min="-95" max="95" step="1" aria-label="Emphasis value">
+            <span class="unit"></span>
+        </div>
+    </section>
+
+    <footer>
+        <div class="bar">
+            <button type="button" id="phonemesBtn">Phonemes…</button>
+            <button type="button" id="defaultsBtn">Defaults</button>
+            <span class="grow"></span>
+            <span id="spinner" hidden></span>
+            <select id="format" aria-label="File format" title="Format for Save to File"></select>
+            <button type="button" id="saveBtn" title="Ctrl/⌘ S">Save to File…</button>
+            <button type="button" id="stopBtn" title="Ctrl/⌘ .">Stop</button>
+            <button type="button" id="speakBtn" class="primary" title="Ctrl/⌘ Enter">Speak</button>
+        </div>
+        <div id="status" role="status" aria-live="polite"></div>
+    </footer>
+
+    <dialog id="builder" aria-labelledby="builderCaption">
+        <form method="dialog">
+            <p class="caption" id="builderCaption">Pronunciation — CMU phones (x-cmu) separated by spaces; vowels end in a stress digit</p>
+            <input type="text" id="phField" spellcheck="false" autocomplete="off" placeholder="e.g. T AH0 M EY1 T OW0"
+                   aria-label="Phones">
+            <p id="readsAs"> </p>
+            <p id="phStatus"> </p>
+            <div class="stressRow">
+                <span>Vowel stress:</span>
+                <div class="segmented" role="radiogroup" aria-label="Vowel stress">
+                    <label><input type="radio" name="stress" value="0"> Unstressed (0)</label>
+                    <label><input type="radio" name="stress" value="1" checked> Primary (1)</label>
+                    <label><input type="radio" name="stress" value="2"> Secondary (2)</label>
+                </div>
+                <span class="grow"></span>
+                <button type="button" id="pauseItem">Pause #</button>
+            </div>
+            <p class="caption">Consonants</p>
+            <div class="grid" data-kind="c"></div>
+            <p class="caption">Vowels</p>
+            <div class="grid" data-kind="v"></div>
+            <p class="caption">Diphthongs</p>
+            <div class="grid" data-kind="d"></div>
+            <div class="bar">
+                <button type="button" id="phRemove">Remove Last</button>
+                <button type="button" id="phClear">Clear</button>
+                <button type="button" id="phPreview">▶ Preview</button>
+                <span class="grow"></span>
+                <button type="button" id="phCancel">Cancel</button>
+                <button type="button" id="phCommit" class="primary">Insert</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="confirm" aria-labelledby="confirmTitle">
+        <form method="dialog">
+            <h2 id="confirmTitle"></h2>
+            <p id="confirmBody"></p>
+            <div class="bar">
+                <span class="grow"></span>
+                <button value="cancel">Cancel</button>
+                <button value="ok" id="confirmOk" class="primary"></button>
+            </div>
+        </form>
+    </dialog>
+
+    <script src="phonemes.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

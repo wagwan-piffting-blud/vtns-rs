@@ -1,0 +1,7 @@
+# The context is vtpaul-rs; send the sources only.
+.git
+target
+dist
+gui/target
+gui/dist
+gui/gen

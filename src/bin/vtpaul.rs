@@ -15,7 +15,7 @@ const USAGE: &str = "usage:
   vtpaul checksum <M16 dir> [pool]    decode every unit, print count + FNV-1a of all samples
   vtpaul fnv <file.wav>               FNV-1a of a 44-byte-header WAV's data, for comparing with checksum
   vtpaul speak <data root> <text|@file> <out.wav> [pitch speed volume pause comma emphasis] [--fmt 0..9]
-                                       <data root> holds data-paul\\M16 and data-common (e.g. \"C:\\Program Files (x86)\\NWSPaulNumber2\")
+                                       <data root> holds data-paul\\M16 and data-common (a VoiceText install folder)
                                        pitch/speed/volume/pause/comma: -1 keeps the engine default; emphasis defaults to 0 (no -1 sentinel); --fmt defaults to 4 (16-bit PCM WAVE)
   vtpaul synth-wa <data root> <capture.json> <out.wav> [pitch speed volume pause comma emphasis] [--fmt 0..9]
                                        synthesizes from a captured WA (JSON with wa_in+words_out events per
@@ -189,18 +189,26 @@ const CLI_USAGE: &str = "usage: vtpaul [options] [text ...]
       --raw                pass the text bytes through as-is (default: UTF-8 is converted to Windows-1252)
 
   Values outside a range are clamped the way the original engine clamps them.
-  Data root search order: --data, %VTPAUL_DATA%, the folder holding vtpaul.exe,
-  C:\\Program Files (x86)\\NWSPaulNumber2.
   Developer commands: info, unit, checksum, fnv, speak, synth-wa, bench (vtpaul dev-help).
   Text that starts with one of those words needs -- in front: vtpaul -- speak up.";
 
-const DEFAULT_DATA_ROOT: &str = r"C:\Program Files (x86)\NWSPaulNumber2";
+/// The usage text plus the data folders this machine would search.
+fn cli_usage() -> String {
+    let mut s = format!(
+        "{}\n\n  Voice data: --data, else VTPAUL_DATA, else the first of these that holds the voice:\n    the folder holding vtpaul",
+        CLI_USAGE
+    );
+    for r in vtpaul::install::default_roots() {
+        s.push_str(&format!("\n    {}", r.display()));
+    }
+    s
+}
 
 fn usage_exit(msg: &str) -> ! {
     if !msg.is_empty() {
         eprintln!("vtpaul: {}", msg);
     }
-    eprintln!("{}", CLI_USAGE);
+    eprintln!("{}", cli_usage());
     exit(2)
 }
 
@@ -220,21 +228,24 @@ fn voice_dir(name: &str) -> Option<&'static str> {
     })
 }
 
-fn find_data_root(flag: Option<String>, voice: &str) -> PathBuf {
+/// `--data` or VTPAUL_DATA as given, else the first default folder holding
+/// the voice; `Err` lists the folders searched.
+fn find_data_root(flag: Option<String>, voice: &str) -> Result<PathBuf, Vec<PathBuf>> {
     if let Some(d) = flag {
-        return PathBuf::from(d);
+        return Ok(PathBuf::from(d));
     }
     if let Ok(d) = std::env::var("VTPAUL_DATA") {
         if !d.is_empty() {
-            return PathBuf::from(d);
+            return Ok(PathBuf::from(d));
         }
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        if is_data_root(&dir, voice) {
-            return dir;
-        }
+    let mut tried: Vec<PathBuf> = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).into_iter().collect();
+    tried.extend(vtpaul::install::default_roots());
+    // The 2009 Julie install spells its directory data-julie.
+    match tried.iter().find(|p| is_data_root(p, voice) || (voice == "juli" && is_data_root(p, "julie"))) {
+        Some(p) => Ok(p.clone()),
+        None => Err(tried),
     }
-    PathBuf::from(DEFAULT_DATA_ROOT)
 }
 
 fn format_code(name: &str) -> Option<i32> {
@@ -250,29 +261,6 @@ fn format_code(name: &str) -> Option<i32> {
         "adpcm" => formats::FMT_DADPCM,
         _ => return None,
     })
-}
-
-/// UTF-8 text as the Windows-1252 bytes the engine reads; characters with no
-/// Windows-1252 code become `?`. Input that is not valid UTF-8 is assumed to
-/// be Windows-1252 already and passed through.
-fn to_cp1252(b: &[u8]) -> Vec<u8> {
-    const HI: [char; 32] = [
-        '\u{20ac}', '\u{81}', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2c6}',
-        '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8d}', '\u{17d}', '\u{8f}', '\u{90}', '\u{2018}',
-        '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2dc}', '\u{2122}', '\u{161}',
-        '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
-    ];
-    let Ok(s) = std::str::from_utf8(b) else {
-        return b.to_vec();
-    };
-    s.strip_prefix('\u{feff}')
-        .unwrap_or(s)
-        .chars()
-        .map(|c| match c as u32 {
-            u @ (0..=0x7f | 0xa0..=0xff) => u as u8,
-            _ => HI.iter().position(|&h| h == c).map(|p| 0x80 + p as u8).unwrap_or(b'?'),
-        })
-        .collect()
 }
 
 #[cfg(windows)]
@@ -330,7 +318,7 @@ fn cli_main(args: &[String]) {
                 "--raw" => raw = true,
                 "--x64" => x64 = true,
                 "-h" | "--help" => {
-                    println!("{}", CLI_USAGE);
+                    println!("{}", cli_usage());
                     return;
                 }
                 "--" => {
@@ -372,17 +360,25 @@ fn cli_main(args: &[String]) {
             }
         }
     };
-    let text = if raw { bytes } else { to_cp1252(&bytes) };
+    let text = if raw { bytes } else { vtpaul::cp1252::from_utf8(&bytes) };
 
     let voice = match &voice_name {
         Some(n) => voice_dir(n).unwrap_or_else(|| usage_exit(&format!("unknown voice {}", n))),
         None => "paul",
     };
-    let root = find_data_root(data, voice);
+    let root = find_data_root(data, voice).unwrap_or_else(|tried| {
+        eprintln!("vtpaul: no voice data for {} found; looked in:", voice);
+        for p in &tried {
+            eprintln!("  {}", p.display());
+        }
+        eprintln!("pass --data <folder holding data-{} and data-common>, or set VTPAUL_DATA", voice);
+        exit(1)
+    });
     // The 2009 Julie install spells its directory data-julie.
     let voice = if voice == "juli" && !is_data_root(&root, voice) && is_data_root(&root, "julie") { "julie" } else { voice };
     if !is_data_root(&root, voice) {
-        eprintln!("vtpaul: no voice data in {} (expected data-{}\\M16 and data-common there; see --data)", root.display(), voice);
+        let m16 = Path::new(&format!("data-{}", voice)).join("M16");
+        eprintln!("vtpaul: no voice data in {} (expected {} and data-common there; see --data)", root.display(), m16.display());
         exit(1);
     }
     let open_err = |e: std::io::Error| -> ! {

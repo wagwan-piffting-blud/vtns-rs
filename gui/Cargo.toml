@@ -1,0 +1,24 @@
+[package]
+name = "vtns-gui"
+version = "1.0.0"
+edition = "2021"
+description = "VTNS: a desktop reader for VoiceText (NeoSpeech) voices"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "vtns-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+vtpaul = { path = ".." }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

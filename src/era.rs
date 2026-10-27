@@ -21,6 +21,7 @@ pub enum Era {
     Paul09,
     Julie09,
     Violeta09,
+    Paul04,
 }
 
 impl Era {
@@ -28,6 +29,9 @@ impl Era {
     pub fn detect(bank: &Bank, m16: &Path, lang: Lang) -> io::Result<Era> {
         if bank.version == "ver.2013" {
             return Ok(Era::V2014);
+        }
+        if bank.version == "ver.2004" && lang == Lang::Eng {
+            return Ok(Era::Paul04);
         }
         match lang {
             Lang::Spa => Ok(Era::Violeta09),
@@ -40,12 +44,16 @@ impl Era {
             }
             Lang::Eng => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{}: {} English voice data is not supported (ver.2013 and ver.2009 are)", m16.display(), bank.version),
+                format!("{}: {} English voice data is not supported (ver.2013, ver.2009 and ver.2004 are)", m16.display(), bank.version),
             )),
         }
     }
 
     pub fn is_2009(self) -> bool {
-        self != Era::V2014
+        !matches!(self, Era::V2014 | Era::Paul04)
+    }
+
+    pub fn is_2004(self) -> bool {
+        self == Era::Paul04
     }
 }

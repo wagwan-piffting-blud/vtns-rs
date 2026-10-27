@@ -8,6 +8,8 @@ use std::path::Path;
 
 #[path = "prosody_tables.rs"]
 pub mod tables;
+#[path = "prosody_tables_paul04.rs"]
+pub mod tables04;
 
 use crate::era::Era;
 use crate::tree2;
@@ -161,6 +163,24 @@ pub fn phone_props(code: u8) -> [u8; 8] {
     }
 }
 
+/// `phone_index` of the sentence's build (the 2004 tables are its own copies).
+fn phone_index_e(era: Era, code: u8) -> i8 {
+    if era == Era::Paul04 { tables04::PHONE_INDEX[(code & 0x7f) as usize] } else { phone_index(code) }
+}
+
+fn phone_stress_e(era: Era, code: u8) -> u8 {
+    if era == Era::Paul04 { tables04::PHONE_STRESS[(code & 0x7f) as usize] } else { PHONE_STRESS[(code & 0x7f) as usize] }
+}
+
+fn phone_props_e(era: Era, code: u8) -> [u8; 8] {
+    let i = phone_index_e(era, code);
+    if (0..40).contains(&i) {
+        if era == Era::Paul04 { tables04::PHONE_PROPS[i as usize].1 } else { PHONE_PROPS[i as usize].1 }
+    } else {
+        [0; 8]
+    }
+}
+
 /// The 2009 builds (julie09 `FUN_10013010`/`FUN_10013450`) leave out BRK_GRAVE.
 fn is_final_break(era: Era, b: u8) -> bool {
     matches!(b, BRK_PHRASE | BRK_SENTENCE | BRK_QUESTION) || (b == BRK_GRAVE && era == Era::V2014)
@@ -179,18 +199,18 @@ pub fn duration_features(s: &Sentence, wi: usize, si: usize, p: usize) -> [i16; 
     let nsyl = w.syllables.len();
     let last_in_word = si + 1 == nsyl && p + 1 == syl.n_phones as usize;
     let mut fv = [0i16; 9];
-    fv[0] = phone_index(w.codes[k]) as i16;
+    fv[0] = phone_index_e(s.era, w.codes[k]) as i16;
     fv[1] = if si == 0 && p == 0 {
         if starts_after_pause(s, wi) { EDGE_PAUSE } else { EDGE_JUNCTURE }
     } else {
-        phone_index(w.codes[k - 1]) as u8 as i16
+        phone_index_e(s.era, w.codes[k - 1]) as u8 as i16
     };
     fv[2] = if last_in_word {
         if is_final_break(s.era, w.brk) { EDGE_PAUSE } else { EDGE_JUNCTURE }
     } else {
-        phone_index(w.codes[k + 1]) as u8 as i16
+        phone_index_e(s.era, w.codes[k + 1]) as u8 as i16
     };
-    fv[3] = PHONE_STRESS[(w.codes[k] & 0x7f) as usize] as i16;
+    fv[3] = phone_stress_e(s.era, w.codes[k]) as i16;
     fv[4] = syl.b1 as i16;
     fv[5] = syl.b2 as i16;
     fv[6] = if si == 0 && starts_after_pause(s, wi) {
@@ -213,7 +233,7 @@ pub fn predict_durations(trees: &Trees, s: &mut Sentence) {
             for p in 0..s.words[wi].syllables[si].n_phones as usize {
                 let fv = duration_features(s, wi, si, p);
                 let k = s.words[wi].syllables[si].first_phone as usize + p;
-                let props = phone_props(s.words[wi].codes[k]);
+                let props = phone_props_e(s.era, s.words[wi].codes[k]);
                 let tree = if props[0] == 1 {
                     match props[1] {
                         1 => Some(&trees.vshort),
@@ -257,13 +277,13 @@ pub fn pitch_features(s: &Sentence, wi: usize, si: usize) -> [i16; 12] {
     let nsyl = w.syllables.len();
     let first = syl.first_phone as usize;
     let mut fv = [0i16; 12];
-    fv[0] = phone_props(w.codes[first])[5] as i8 as i16;
+    fv[0] = phone_props_e(s.era, w.codes[first])[5] as i8 as i16;
     let n = syl.n_phones as usize;
     let mut nuc = (0..n).find(|&j| w.pos_code[first + j] == 2).unwrap_or(n);
     if nuc == n {
         nuc = n.wrapping_sub(1);
     }
-    fv[1] = phone_index(w.codes[first + nuc]) as u8 as i16;
+    fv[1] = phone_index_e(s.era, w.codes[first + nuc]) as u8 as i16;
     fv[2] = syl.b0 as i16;
     fv[5] = syl.b2 as i16;
     if si == 0 {
@@ -358,10 +378,87 @@ pub fn smooth_f0(s: &mut Sentence) {
     }
 }
 
+/// 2004 `FUN_1000f330`: median of `v` (descending bubble sort, element n / 2).
+fn median04(v: &[f32]) -> f32 {
+    let mut a = v.to_vec();
+    let n = a.len();
+    for i in 0..n {
+        for j in i + 1..n {
+            if a[i] < a[j] {
+                a.swap(i, j);
+            }
+        }
+    }
+    a[n / 2]
+}
+
+/// 2004 `FUN_1000f3e0` for every phrase. Each adjacent syllable pair is rescaled so that the
+/// median levels of the two sides meet (a ramp over each syllable's 12 points), the seam of
+/// A[5..12] ++ B[0..7] is replaced by a straight line from A[5] to B[6], and both contours are
+/// written back as `(short)(x + 0.5)`; the next pair reads the written values. x87 runs at 53-bit
+/// precision, so the arithmetic is f64 with f32 rounding at every 4-byte store.
+pub fn smooth_f0_04(s: &mut Sentence) {
+    let mut w0 = 0;
+    for &nw in &s.phrase_words {
+        let mut refs: Vec<(usize, usize)> = Vec::new();
+        for wi in w0..(w0 + nw).min(s.words.len()) {
+            for si in 0..s.words[wi].syllables.len() {
+                refs.push((wi, si));
+            }
+        }
+        w0 += nw;
+        for j in 0..refs.len().saturating_sub(1) {
+            let (aw, asy) = refs[j];
+            let (bw, bsy) = refs[j + 1];
+            let mut a = [0f32; 12];
+            let mut b = [0f32; 12];
+            for k in 0..12 {
+                a[k] = s.words[aw].syllables[asy].f0[k] as f32;
+                b[k] = s.words[bw].syllables[bsy].f0[k] as f32;
+            }
+            let rms = |x: f32| -> f32 { ((x * x * 0.5f32) as f64).sqrt() as f32 };
+            let mut p1 = [0f32; 7];
+            let mut p2 = [0f32; 7];
+            for i in 0..7 {
+                p1[i] = rms(a[5 + i]);
+                p2[i] = rms(b[i]);
+            }
+            let m1 = median04(&p1);
+            let m2 = median04(&p2);
+            let avg = ((m2 as f64 + m1 as f64) / 2.0) as f32;
+            let r1 = ((avg as f64 / m1 as f64).sqrt()) as f32;
+            let r2 = ((avg as f64 / m2 as f64).sqrt()) as f32;
+            let d1 = ((r1 as f64 - 1.0) / 11.0) as f32;
+            let d2 = ((1.0 - r2 as f64) / 11.0) as f32;
+            for k in 0..12 {
+                let n = (k as i32 - 11) as f32 as f64;
+                a[k] = ((n * d1 as f64 + r1 as f64) * a[k] as f64) as f32;
+                b[k] = ((n * d2 as f64 + 1.0) * b[k] as f64) as f32;
+            }
+            for j in 0..7 {
+                let m = (j as i32 - 13) as f32 as f64;
+                a[5 + j] = (((b[6] as f64 - a[5] as f64) / 13.0) * m + b[6] as f64) as f32;
+            }
+            for j in 0..7 {
+                let m = (j as i32 - 6) as f32 as f64;
+                b[j] = (((b[6] as f64 - a[5] as f64) / 13.0) * m + b[6] as f64) as f32;
+            }
+            for k in 0..12 {
+                s.words[aw].syllables[asy].f0[k] = (a[k] as f64 + 0.5) as i64 as i16;
+                s.words[bw].syllables[bsy].f0[k] = (b[k] as f64 + 0.5) as i64 as i16;
+            }
+        }
+    }
+}
+
 /// Full pro_PredictPitch: tone + contour per syllable, then smoothing.
 pub fn predict_pitch(trees: &Trees, s: &mut Sentence) {
     predict_pitch_raw(trees, s);
-    smooth_f0(s);
+    if s.era == Era::Paul04 {
+        smooth_f0_04(s);
+    } else {
+        smooth_f0(s);
+    }
 }
 
 /// pro_QuantizeDurationDiv50 (0x10022fd0). The argument is taken as a short.
@@ -608,6 +705,90 @@ pub fn apply_tag_spans_era(era: Era, ctx: &SpanContext, spans: &mut [SpanList; 8
             }
         }
     }
+}
+
+/// 2004 `FUN_1001a410`: the pitch / duration-factor / volume a sentence's words are seeded with. A value
+/// the text stage set (`flags[k]`, a leading tag) wins over the channel's; clamps 50..=200, 25..=200, 0..=500.
+pub fn seed_rates04(flags: [bool; 3], vtml: [i32; 3], chan: [i32; 3]) -> [i32; 3] {
+    let pick = |k: usize| if flags[k] { vtml[k] } else { chan[k] };
+    [pick(0).clamp(50, 200), pick(1).clamp(25, 200), pick(2).clamp(0, 500)]
+}
+
+/// 2004 `FUN_1001a130`: applies the text stage's span lists (`spans[0..5]`: pitch, speed, volume, pause,
+/// break) to the word arrays. Rate spans multiply: words before span j take the previous span's value
+/// (100 for the first) as a percentage of their seed, clamped to the kind's range, and the last span
+/// covers everything after it. Pause / break spans set the array entry of every word whose gap (end of
+/// the previous word, or `cursor` for word 0, up to its start) contains a span position; the last
+/// match wins. `words` are (start, end) in the tag-stripped text.
+pub fn apply_tag_spans04(words: &[(i32, i32)], cursor: i32, spans: &[SpanList; 5], r: &mut WordRates) {
+    let n = words.len();
+    for k in 0..3 {
+        let l = &spans[k];
+        let cnt = l.pos.len().min(l.val.len());
+        if cnt == 0 {
+            continue;
+        }
+        let (mx, mn) = (SPAN_MAX[k], SPAN_MIN[k]);
+        let arr = match k {
+            0 => &mut r.pitch,
+            1 => &mut r.speed,
+            _ => &mut r.volume,
+        };
+        let (mut wi, mut filled) = (0usize, 0usize);
+        for j in 0..cnt {
+            let prev = if j == 0 { 100 } else { l.val[j - 1] };
+            while wi < n && words[wi].0 < l.pos[j] {
+                wi += 1;
+            }
+            if filled < wi {
+                for idx in filled..wi {
+                    arr[idx] = (prev.wrapping_mul(arr[idx]) / 100).max(mn).min(mx);
+                }
+                filled = wi;
+            }
+            if j + 1 == cnt && filled < n {
+                for idx in filled..n {
+                    arr[idx] = (arr[idx].wrapping_mul(l.val[j]) / 100).max(mn).min(mx);
+                }
+                filled = n;
+            }
+        }
+    }
+    for k in 3..5 {
+        let l = &spans[k];
+        let cnt = l.pos.len().min(l.val.len());
+        if cnt == 0 {
+            continue;
+        }
+        let arr = if k == 3 { &mut r.pause } else { &mut r.brk };
+        for i in 0..n {
+            let (lo, hi) = if i == 0 { (cursor, words[0].0) } else { (words[i - 1].1, words[i].0) };
+            for j in 0..cnt {
+                if lo <= l.pos[j] && l.pos[j] <= hi {
+                    arr[i] = l.val[j];
+                }
+            }
+        }
+    }
+}
+
+/// 2004 sentence pause (`fe_ProcessNextSentence`, inline): an unset pause[0] takes the request's pause
+/// (`TIB+0x121d28`), else the TIB's (`+0x121d24`), else the channel's; 20000 and above is 20000.
+pub fn resolve_sentence_pause04(p0: i32, call_pause: i32, tib_pause: i32, ch_pause: i32) -> i32 {
+    let mut p = p0;
+    if p < 0 {
+        p = if call_pause >= 0 {
+            call_pause
+        } else if tib_pause >= 0 {
+            tib_pause
+        } else {
+            ch_pause
+        };
+    }
+    if p > 19999 {
+        p = 20000;
+    }
+    p
 }
 
 /// pro_ResolveSentencePause (0x10026750): resolves pause[0] in place.

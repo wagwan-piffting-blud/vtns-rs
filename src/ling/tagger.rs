@@ -166,7 +166,7 @@ pub fn suffix_class(w: Option<&[u8]>) -> i16 {
 }
 
 /// `FUN_10006ca0`: 0 none, 1 not a preposition, else preposition index + 2.
-fn prep_code(w: Option<&[u8]>) -> i16 {
+pub(crate) fn prep_code(w: Option<&[u8]>) -> i16 {
     match w {
         Some(p) if !p.is_empty() => {
             let i = bsearch_ci(&L_PREP, p);
@@ -264,7 +264,7 @@ pub fn word_class_e(e09: bool, a: Option<&[u8]>, b: Option<&[u8]>, c: Option<&[u
 }
 
 /// `FUN_10008440(p1, p2)`: modal / auxiliary + infinitive marker.
-pub(super) fn modal_pair(p1: &[u8], p2: Option<&[u8]>) -> bool {
+pub(crate) fn modal_pair(p1: &[u8], p2: Option<&[u8]>) -> bool {
     if p2.map_or(true, |s| s.is_empty()) && in_list(&L_MODAL, p1) {
         return true;
     }
@@ -279,7 +279,7 @@ pub(super) fn modal_pair(p1: &[u8], p2: Option<&[u8]>) -> bool {
 }
 
 /// `FUN_10010840`.
-fn aux_context(p1: Option<&[u8]>, p2: Option<&[u8]>) -> bool {
+pub(crate) fn aux_context(p1: Option<&[u8]>, p2: Option<&[u8]>) -> bool {
     if let Some(a) = p1.filter(|s| !s.is_empty()) {
         if ci(a, b"let") || modal_pair(a, p2) || (modal_pair(a, Some(b"")) && oci(p2, b"not")) {
             return true;

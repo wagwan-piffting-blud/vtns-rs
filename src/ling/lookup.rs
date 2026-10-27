@@ -4,7 +4,7 @@
 
 use super::tables::CHAR_CLASS;
 use super::{sc, war, Wa, Ws};
-use crate::lexicon::{decode_payload, Lexicon};
+use crate::lexicon::Lexicon;
 
 pub mod cand {
     pub const COUNT: usize = 0x00;
@@ -44,6 +44,19 @@ pub fn split_token(
     preset_nonempty: bool,
     keep_case: bool,
     lex: &Lexicon,
+) -> Vec<u8> {
+    split_token_era(buf, is_last, forced_pos, preset_nonempty, keep_case, lex, false)
+}
+
+/// `split_token`; the 2004 splitter (`FUN_1000a560`) has no final-`-` split and no VTML-marker split.
+pub fn split_token_era(
+    buf: &mut TokenBuf,
+    is_last: bool,
+    forced_pos: u8,
+    preset_nonempty: bool,
+    keep_case: bool,
+    lex: &Lexicon,
+    v2004: bool,
 ) -> Vec<u8> {
     let n = buf.b.len();
     let take_all = |buf: &mut TokenBuf| -> Vec<u8> {
@@ -126,7 +139,7 @@ pub fn split_token(
                 split_rest(buf, i);
                 return out;
             }
-            if c == b'-' {
+            if c == b'-' && !v2004 {
                 split_rest(buf, i);
                 return out;
             }
@@ -167,7 +180,7 @@ pub fn split_token(
             out.extend_from_slice(&[c, c1, c2]);
             i += 3;
         } else {
-            if n != 2 && !out.is_empty() && c == 0xa2 && c1 == 0xfe {
+            if !v2004 && n != 2 && !out.is_empty() && c == 0xa2 && c1 == 0xfe {
                 split_rest(buf, i);
                 return out;
             }
@@ -197,11 +210,28 @@ pub fn fill_candidate(
     preset: &[u8],
     flag: bool,
 ) {
+    fill_candidate_with(ws, idx, spelling, payload, token, prev_token, forced_pos, preset, flag, &super::tables::CODEBOOK);
+}
+
+/// `fill_candidate` with an explicit phone codebook (the 2004 engine has its own).
+#[allow(clippy::too_many_arguments)]
+pub fn fill_candidate_with(
+    ws: &mut Ws,
+    idx: usize,
+    spelling: &[u8],
+    payload: &[u8],
+    token: i16,
+    prev_token: i32,
+    forced_pos: u8,
+    preset: &[u8],
+    flag: bool,
+    book: &[&[u8]; 256],
+) {
     let c = Ws::cand(idx);
     ws.set_i16(c + cand::TOKEN, token);
     ws.set_i16(c + cand::COUNT, 0);
     ws.strcpy(c + cand::SPELLING, spelling);
-    let e = decode_payload(payload);
+    let e = crate::lexicon::decode_payload_with(payload, book);
     ws.set_u8(c + cand::CLASS_CHAR, e.class_char);
     ws.set_i16(c + cand::B40, e.b40);
     ws.set_i16(c + cand::B20, e.b20);

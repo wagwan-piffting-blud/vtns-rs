@@ -3,7 +3,7 @@
 //! Ported: the core piece-capture loop (`FUN_10049980`, here `dotpiece`),
 //! classification against the three domain-suffix tables (all three, plus
 //! the 8 shape templates and the phone-adjacent tables, transcribed with
-//! `C:\tmp\vtwork\v4c_symbols\gen_rust_tables.py` via `pefile` -- never by
+//! a `pefile` generator (`gen_rust_tables.py`, not in this repository) -- never by
 //! hand), shape matching with shrink-and-retry (`CC_TLD`/`GENERIC_TLD`/
 //! `SECOND_TLD`/`URL_SHAPES`), the per-entry render (`FUN_100490a0`, spelling
 //! each piece via `spell::expand`), and, from `FUN_100494c0`, the narrow "a

@@ -1,0 +1,393 @@
+:root {
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --border: #d2d2d7;
+    --button: #ffffff;
+    --button-hover: #ececf0;
+    --accent: #0a64d6;
+    --accent-text: #ffffff;
+    --danger: #c9302c;
+    color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #1e1e20;
+        --panel: #2a2a2d;
+        --text: #f2f2f4;
+        --muted: #a1a1a6;
+        --border: #444448;
+        --button: #3a3a3e;
+        --button-hover: #46464b;
+        --accent: #3b8cf0;
+        --accent-text: #ffffff;
+        --danger: #ff6961;
+        color-scheme: dark;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+button, select, input {
+    font: inherit;
+    color: inherit;
+}
+
+button {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--button);
+    cursor: default;
+}
+
+button:hover:not(:disabled) {
+    background: var(--button-hover);
+}
+
+button:disabled {
+    opacity: 0.45;
+}
+
+button.primary {
+    min-width: 96px;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+button.primary:hover:not(:disabled) {
+    background: var(--accent);
+    filter: brightness(1.08);
+}
+
+/* Markup toolbar and its drop-down menus */
+
+nav#markup {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.menu {
+    position: relative;
+}
+
+.menu > button::after {
+    content: " ▾";
+    color: var(--muted);
+}
+
+.menu ul {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 10;
+    min-width: 220px;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.menu ul[hidden] {
+    display: none;
+}
+
+.menu li button {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    text-align: left;
+}
+
+.menu li button:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+.menu li.sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
+}
+
+/* Editor */
+
+textarea#text {
+    flex: 1;
+    min-height: 140px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    resize: none;
+}
+
+textarea#text:focus, input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+/* Voice controls */
+
+#controls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.row > label:first-child {
+    width: 104px;
+    text-align: right;
+}
+
+.row.off, label.off {
+    opacity: 0.45;
+}
+
+.row input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+}
+
+.row input[type=number] {
+    width: 64px;
+    padding: 2px 4px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    text-align: right;
+}
+
+.row select, .bar select {
+    min-width: 150px;
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+}
+
+.bar select {
+    min-width: 0;
+}
+
+.row .check {
+    margin-left: 20px;
+}
+
+.unit {
+    width: 22px;
+    color: var(--muted);
+}
+
+/* Transport */
+
+.bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.grow {
+    flex: 1;
+}
+
+#spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+#spinner[hidden] {
+    display: none;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#status {
+    min-height: 1.4em;
+    margin-top: 6px;
+    padding-left: 2px;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#status.error {
+    color: var(--danger);
+}
+
+/* Dialogs */
+
+dialog {
+    max-width: calc(100vw - 32px);
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+dialog::backdrop {
+    background: rgba(0, 0, 0, 0.3);
+}
+
+dialog form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+dialog h2 {
+    margin: 0;
+    font-size: 15px;
+}
+
+#confirm {
+    width: 520px;
+}
+
+#confirmBody {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+#builder {
+    width: 640px;
+}
+
+.caption {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+#phField {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    font: 14px ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+#readsAs {
+    min-height: 1.4em;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+}
+
+#phStatus {
+    min-height: 1.4em;
+    margin: 0;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+#phStatus.bad {
+    color: var(--danger);
+}
+
+.stressRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.segmented {
+    display: flex;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.segmented label {
+    padding: 3px 8px;
+}
+
+.segmented label:has(input:checked) {
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+.segmented input {
+    display: none;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(8, 68px);
+    gap: 6px;
+}
+
+.grid button {
+    height: 46px;
+    padding: 2px;
+    line-height: 1.2;
+}
+
+.grid b {
+    display: block;
+    font-size: 13px;
+}
+
+.grid small {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.grid small em {
+    color: var(--accent);
+    font-style: normal;
+    font-weight: 700;
+}
+
+.grid button:hover small, .grid button:hover small em {
+    color: inherit;
+}

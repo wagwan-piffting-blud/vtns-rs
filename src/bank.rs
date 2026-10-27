@@ -140,6 +140,8 @@ pub struct Bank {
     pub version: String,
     /// Per global unit: which pool (== .dat/.upm file index).
     pub file_idx: Vec<u8>,
+    /// Raw first column of every index (the unit's dat-file number within its pool).
+    pub file_col: Vec<u8>,
     /// ver.2013 only, per global unit: `[L2, L1, C, R1, R2, posbits, flags]`.
     pub label: Vec<[u8; 7]>,
     /// ver.2009 only, per global unit: `[L1, C, R1, posbits, flags]`.
@@ -167,6 +169,7 @@ impl Bank {
             layout: IdxLayout::V2013,
             version: String::new(),
             file_idx: Vec::new(),
+            file_col: Vec::new(),
             label: Vec::new(),
             label5: Vec::new(),
             flag: Vec::new(),
@@ -231,6 +234,7 @@ impl Bank {
         p += s * nn;
         let fidx = self.pools.len() as u8;
         self.file_idx.extend(std::iter::repeat(fidx).take(nn));
+        self.file_col.extend_from_slice(&raw[p..p + nn]);
         p += nn;
         match layout {
             IdxLayout::V2013 => {

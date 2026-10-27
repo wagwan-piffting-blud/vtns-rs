@@ -18,7 +18,7 @@ other docs link into them instead of repeating tables.
 | [UNITSEL.md](UNITSEL.md) | Unit database as selection sees it, back-off lattice, target/join cost, Viterbi, beam pruning |
 | [WAVEFORM.md](WAVEFORM.md) | Unit records, Shorten decode, join smoother, OLA/PSOLA, output formats, sync, lip-sync log |
 | [VIOLETA.md](VIOLETA.md) | Spanish engine (Violeta 2013 and the 2009 build): per-stage differences from English |
-| [OLD_PAUL.md](OLD_PAUL.md) | The 2009 engines (Paul09, Julie09, Violeta09): formats and per-stage differences from 2014 |
+| [OLD_PAUL.md](OLD_PAUL.md) | The 2009 engines (Paul09, Julie09, Violeta09) and the 2004 Paul engine: formats and per-stage differences from 2014 |
 | [README_TECHNICAL.md](README_TECHNICAL.md) | Byte maps of every on-disk file format the 2014 English engine reads |
 | [DLL_ANALYSIS.md](DLL_ANALYSIS.md) | Function inventory of `vt_eng.dll` by stage, with Rust counterparts |
 | [EXPERIMENTS.md](EXPERIMENTS.md) | Parity runs, negative controls and fixes per stage |
@@ -66,11 +66,13 @@ Durations never reach the waveform directly; they only feed the target cost.
 | Paul09 | `vt_eng_paul16.dll` (2009-09-15) | `ver.2009`, `.tree2` | `Era::Paul09` |
 | Julie09 | `vt_eng_julie16.dll` (Dec 2009) | `ver.2009`, tree3 | `Era::Julie09` |
 | Violeta09 | `vt_spa_violeta16.dll` (Dec 2009) | `ver.2005` header, tree3 | `Era::Violeta09` |
+| Paul04 | `vt_eng.dll` (2005-03-31) | `ver.2004`, `.tree2` | `Era::Paul04` |
 
 `Era::detect` (`src/era.rs`) picks the build from the bank header and tree layout. x64 differs from x86
 only in single-precision float evaluation in unit selection (see [UNITSEL.md](UNITSEL.md)). The 2009
 builds differ in index layout (5-byte labels), word-record layouts, text and linguistic rules, selector
-and wave details; each stage doc has a "2009 builds" section.
+and wave details; each stage doc has a "2009 builds" section. Paul04 has its own text front end, unit
+selector and waveform code (`text04`, `ling04`, `unitsel04`, `wave04`; see [OLD_PAUL.md](OLD_PAUL.md)).
 
 ## Status
 
@@ -83,6 +85,7 @@ Every stage is bit-exact against the real engine on its capture corpus. End to e
 | Violeta 2013 (`speak_spa_parity`) | 1327/1327 WAVs (2026-09-29) |
 | Paul09, Julie09 (`speak_old_parity`) | 2741/2741 each (2026-10-05) |
 | Violeta09 (`speak_old_parity`) | 1366/1366 (2026-10-05) |
+| Paul04 (`e2e_text_paul04_parity`) | 2909/2909 (2026-10-16) |
 
 Open, not blocking: Spanish lip-sync log; `.his` selection history on 2009 engines (no capture).
 

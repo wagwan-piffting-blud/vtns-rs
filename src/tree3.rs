@@ -12,7 +12,7 @@ pub struct Node {
     pub no: i16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Tree {
     pub dim: usize,
     pub nodes: Vec<Node>,

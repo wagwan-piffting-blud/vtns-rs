@@ -25,7 +25,7 @@ const HALF: i32 = (HANN_LEN as i32) >> 1;
 const SMOOTH_BUF: usize = 10_000;
 
 #[inline]
-fn hann(i: i32) -> f32 {
+pub fn hann(i: i32) -> f32 {
     f32::from_bits(tables::HANN_BITS[i as usize])
 }
 

@@ -151,7 +151,7 @@ pub fn lts_valid(lex: &Lexicon, w: &[u8]) -> bool {
 }
 
 /// `FUN_10002d70`: letter feature code.
-fn letter_code(c: u8) -> i16 {
+pub(crate) fn letter_code(c: u8) -> i16 {
     if c.is_ascii_uppercase() {
         return c as i16 - 0x40;
     }

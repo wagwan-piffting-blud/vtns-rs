@@ -469,6 +469,16 @@ pub fn phrase_wave_targets(bank: &Bank, r: &PhraseResult) -> io::Result<Vec<wave
         .collect()
 }
 
+fn unsupported_2004() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "Paul04: synthesis from captured WAs is not supported; speak from text instead")
+}
+
+/// The 2004 engine's own front end and unit classes (`text04`, `unitsel04`).
+pub struct Paul04 {
+    pub fe: crate::text04::Fe,
+    pub cls: crate::unitsel04::Cls04,
+}
+
 pub struct Engine {
     pub bank: Bank,
     pub cls: Classes,
@@ -481,6 +491,7 @@ pub struct Engine {
     /// Match the 64-bit voice DLLs instead of the 32-bit vt_eng.dll (see `Selector::x64`).
     pub x64: bool,
     pub era: Era,
+    pub p04: Option<Paul04>,
 }
 
 impl Engine {
@@ -503,17 +514,56 @@ impl Engine {
         let era = Era::detect(&bank, &m16, Lang::Eng)?;
         let cep = CepDist::load(&m16.join("ttsdata").join("dist_tbl").join("cepdist.tbl"))?;
         let sd = ScalarDist::build();
-        let (cls, trees, lex, fe) = if era.is_2009() {
-            let trees = if era == Era::Paul09 {
+        let (cls, trees, lex, fe) = if era.is_2009() || era.is_2004() {
+            let trees = if matches!(era, Era::Paul09 | Era::Paul04) {
                 Trees::load_tree2(&m16.join("ttsdata").join("tree"))?
             } else {
                 Trees::load(&m16.join("ttsdata").join("tree3"))?
             };
-            (Classes::build_era(&bank, era), trees, Lexicon::open_era(&dict, era)?, text::Fe::load_era(&common, era)?)
+            // Paul04 selects with `Paul04::cls`; these paul09 tables only fill the field.
+            // The 2004 install has its own front end (`Paul04::fe`); this one stays empty.
+            let fe = if era.is_2004() { text::Fe { era, ..Default::default() } } else { text::Fe::load_era(&common, era)? };
+            (Classes::build_era(&bank, if era.is_2004() { Era::Paul09 } else { era }), trees, Lexicon::open_era(&dict, era)?, fe)
         } else {
             (Classes::build(&bank), Trees::load(&m16.join("ttsdata").join("tree3"))?, Lexicon::open(&dict)?, text::Fe::load(&common)?)
         };
-        Ok(Engine { bank, cls, cep, sd, trees, lex, fe, chan: Channel::default(), x64: false, era })
+        let p04 = if era.is_2004() {
+            Some(Paul04 { fe: crate::text04::Fe::load(&common)?, cls: crate::unitsel04::Cls04::build(&bank) })
+        } else {
+            None
+        };
+        Ok(Engine { bank, cls, cep, sd, trees, lex, fe, chan: Channel::default(), x64: false, era, p04 })
+    }
+
+    /// The 2004 pipeline: `engine04::front04`, the linguistic stage, SS passes, prosody, `Selector04` and
+    /// `engine04::synth_request04`. The 2004 DLL has no comma-pause or emphasis setting.
+    fn speak04(&self, p: &Paul04, text: &[u8]) -> io::Result<(Vec<i16>, Vec<usize>)> {
+        use crate::engine04::{front04, sentence04, synth_request04};
+        use crate::ling04::sentence::{self as s04, Ss04};
+        let mut ch = crate::wave04::Channel04::default();
+        ch.apply(self.chan.pitch, self.chan.speed, self.chan.volume, self.chan.sent_pause_ms);
+        let mut sel = crate::unitsel04::Selector04::new(&self.bank, &p.cls, &self.cep, &self.sd);
+        let mut ws = Ws::new();
+        let mut sents = Vec::new();
+        for f in front04(&p.fe, text, &ch) {
+            let mut wa = f.wa;
+            crate::ling04::merge::analyze(&mut wa, &mut ws, &p.fe.lex, 0);
+            let mut ss = Ss04::new();
+            ss.set_i16(2, wa.n() as i16);
+            s04::build_words(&mut ss, &wa);
+            if !s04::assign_breaks(&mut ss, &f.brk) {
+                continue;
+            }
+            s04::build_contexts(&mut ss);
+            sents.push(sentence04(&mut ss, &self.trees, &mut sel, &f.rates, &ch));
+        }
+        let s = synth_request04(&self.bank, &sents, &ch)?;
+        let mut end = 0usize;
+        let ends = s.chunks.iter().map(|&b| {
+            end += b / 2;
+            end
+        });
+        Ok((s.pcm, ends.collect()))
     }
 
     /// `VT_SetPitchSpeedVolumePause_ENG` / `VT_SetCommaPause_ENG` /
@@ -640,6 +690,9 @@ impl Engine {
     /// `vtprobe.exe` tracing, not just the decompile).
     pub fn synth_from_wa_traced(&self, sentences: &[SentenceInput]) -> io::Result<(Vec<i16>, Vec<usize>)> {
         let era = self.era;
+        if era.is_2004() {
+            return Err(unsupported_2004());
+        }
         let mut sel = if era.is_2009() {
             Selector::new_era(&self.bank, &self.cls, &self.cep, &self.sd, era)
         } else {
@@ -679,6 +732,9 @@ impl Engine {
     /// (`text_to_sentences`) then `synth_from_wa_traced`. Only as exact as
     /// `crate::text` is.
     pub fn speak_traced(&self, text: &[u8]) -> io::Result<(Vec<i16>, Vec<usize>)> {
+        if let Some(p) = &self.p04 {
+            return self.speak04(p, text);
+        }
         let sentences = self.text_to_sentences(text);
         self.synth_from_wa_traced(&sentences)
     }

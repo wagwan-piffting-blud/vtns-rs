@@ -179,6 +179,7 @@ pub fn lookup2(k: &[u8], initval: u32) -> u32 {
 }
 
 /// A perfect-hashed dictionary (`hashparams_*`, `hashcont_*`, `hashidx_*`, data).
+#[derive(Default)]
 pub struct HashDict {
     seed: u32,
     shift: u32,
@@ -251,7 +252,7 @@ impl HashDict {
 
     /// `fe_HashDictLookup`: payload of an encoded key, or None on a miss.
     pub fn get(&self, enc: &[u8]) -> Option<&[u8]> {
-        if enc.is_empty() {
+        if enc.is_empty() || self.nkeys == 0 {
             return None;
         }
         let s = self.slot(enc);
@@ -284,14 +285,23 @@ pub struct LexEntry {
 }
 
 pub fn expand_codebook(cb: &[u8]) -> Vec<u8> {
+    expand_codebook_with(cb, &CODEBOOK)
+}
+
+/// The 2004 engine's codebook (`ling04::tables::CODEBOOK`) differs from entry 184 on.
+pub fn expand_codebook_with(cb: &[u8], book: &[&[u8]; 256]) -> Vec<u8> {
     let mut out = Vec::new();
     for &b in cb {
-        out.extend_from_slice(CODEBOOK[b as usize]);
+        out.extend_from_slice(book[b as usize]);
     }
     out
 }
 
 pub fn decode_payload(p: &[u8]) -> LexEntry {
+    decode_payload_with(p, &CODEBOOK)
+}
+
+pub fn decode_payload_with(p: &[u8], book: &[&[u8]; 256]) -> LexEntry {
     let mut e = LexEntry::default();
     let Some(&f) = p.first() else {
         return e;
@@ -310,7 +320,7 @@ pub fn decode_payload(p: &[u8]) -> LexEntry {
     e.b20 = (f & 0x20 != 0) as i16;
     e.b80 = (f & 0x80 != 0) as i16;
     if f & 1 != 0 {
-        e.prons.push((Vec::new(), expand_codebook(&p[1..])));
+        e.prons.push((Vec::new(), expand_codebook_with(&p[1..], book)));
     } else if f & 2 != 0 {
         for seg in p[1..].split(|&c| c == 0xff) {
             if seg.is_empty() {
@@ -319,7 +329,7 @@ pub fn decode_payload(p: &[u8]) -> LexEntry {
             let bar = seg.iter().position(|&c| c == b'|').unwrap_or(seg.len());
             let pos: Vec<u8> = seg[..bar].iter().map(|&c| c.wrapping_sub(1)).collect();
             let cb = if bar < seg.len() { &seg[bar + 1..] } else { &[][..] };
-            e.prons.push((pos, expand_codebook(cb)));
+            e.prons.push((pos, expand_codebook_with(cb, book)));
         }
     }
     e
@@ -328,6 +338,7 @@ pub fn decode_payload(p: &[u8]) -> LexEntry {
 /// A `.txt2` table (`fe_LoadTxt2Table` 0x100033e0 / reader `FUN_10010300`,
 /// tokenizer `FUN_10003540`). `M` tables alternate key and value tokens, `L`
 /// tables use the key as its own value.
+#[derive(Default)]
 pub struct Txt2 {
     pub ci: bool,
     pub keys: Vec<Vec<u8>>,
@@ -358,6 +369,49 @@ impl Txt2 {
             } else {
                 t.vals.push(k.clone());
                 t.keys.push(k);
+            }
+        }
+        Ok(t)
+    }
+
+    /// 2004 container (`FUN_100035f0`): magic, shifted body, shift byte, magic; one entry per line. Tables
+    /// that are not sorted under their comparison get the engine's exchange sort (`FUN_10003850`).
+    pub fn open04(path: &Path, map: bool, ci: bool) -> std::io::Result<Txt2> {
+        let raw = std::fs::read(path)?;
+        let n = raw.len();
+        let mut t = Txt2 { ci, keys: Vec::new(), vals: Vec::new() };
+        if n < 8 || raw[..3] != raw[n - 3..] {
+            return Ok(t);
+        }
+        let shift = raw[n - 4];
+        let body: Vec<u8> = raw[3..n - 4].iter().map(|&b| b.wrapping_sub(shift)).collect();
+        let len = body.iter().position(|&c| c == 0).unwrap_or(body.len());
+        if len == 0 {
+            return Ok(t);
+        }
+        let count = body[..len].iter().filter(|&&c| c == b'\n').count() + (body[len - 1] != b'\n') as usize;
+        let mut toks = Tokens { b: &body, p: 0 };
+        for _ in 0..count {
+            let Some(k) = toks.next() else { break };
+            if map {
+                let Some(v) = toks.next() else { break };
+                t.keys.push(k);
+                t.vals.push(v);
+            } else {
+                t.vals.push(k.clone());
+                t.keys.push(k);
+            }
+        }
+        let cmp = |a: &[u8], b: &[u8]| if ci { stricmp(a, b) } else { strcmp(a, b) };
+        if t.keys.windows(2).any(|w| cmp(&w[0], &w[1]) > 0) {
+            let m = t.keys.len();
+            for i in 0..m.saturating_sub(1) {
+                for j in i + 1..m {
+                    if cmp(&t.keys[i], &t.keys[j]) > 0 {
+                        t.keys.swap(i, j);
+                        t.vals.swap(i, j);
+                    }
+                }
             }
         }
         Ok(t)
@@ -507,8 +561,22 @@ impl Lexicon {
         Lexicon::open_era(dict_eng, Era::V2014)
     }
 
-    /// The Paul09 trees are `.tree2` (`tree2::load`); every other build reads `.tree3`.
+    /// The Paul09 trees are `.tree2` (`tree2::load`); every other build reads `.tree3`. Paul04 reads only `emb`,
+    /// `chc.txt2`, `exceptdict`, `atmt.tree2` and `poly.tree2`: it has no tpp dictionary, `wab` or break tree.
     pub fn open_era(dict_eng: &Path, era: Era) -> std::io::Result<Lexicon> {
+        if era == Era::Paul04 {
+            return Ok(Lexicon {
+                emb: HashDict::open(dict_eng, "emb", "engttsdict_emb")?,
+                tpp: HashDict::default(),
+                chc: Txt2::open04(&dict_eng.join("chc.txt2"), true, true)?,
+                wab: Txt2::default(),
+                atmt: crate::tree2::load_multi(&dict_eng.join("atmt.tree2"), 27)?,
+                poly: crate::tree2::load(&dict_eng.join("poly.tree2"), false)?,
+                engbi: crate::tree3::Tree::default(),
+                exc: ExceptDict::open(&dict_eng.join("exceptdict"))?,
+                era,
+            });
+        }
         let tree = |name: &str| -> std::io::Result<crate::tree3::Tree> {
             if era == Era::Paul09 {
                 crate::tree2::load(&dict_eng.join(format!("{}.tree2", name)), false)

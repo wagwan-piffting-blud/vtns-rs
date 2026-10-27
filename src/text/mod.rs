@@ -50,6 +50,7 @@ use crate::tree3::Tree;
 pub use wa::Wa;
 
 /// Front-end resources loaded once per engine (common DB, `data-common`).
+#[derive(Default)]
 pub struct Fe {
     pub ud: Option<userdict::UserDict>,
     pub sbd: Tree,
@@ -79,7 +80,12 @@ impl Fe {
     /// Paul09 reads `sbd.tree2`; the other builds `sbd.tree3`.
     pub fn load_era(common: &Path, era: Era) -> io::Result<Fe> {
         let d = common.join("dict-eng");
-        let ud = std::fs::read(common.join("userdict").join("userdict_eng.csv")).ok().and_then(|b| userdict::UserDict::load(&b));
+        cstr::set_era(era);
+        let mut ud = std::fs::read(common.join("userdict").join("userdict_eng.csv")).ok().and_then(|b| userdict::UserDict::load(&b));
+        if let Some(u) = ud.as_mut().filter(|u| u.has_aliases()) {
+            let lex = crate::lexicon::Lexicon::open_era(&d, era)?;
+            u.resolve_aliases(&|t| alias_phones(&lex, t));
+        }
         Ok(Fe {
             ud,
             sbd: if era == Era::Paul09 { crate::tree2::load(&d.join("sbd.tree2"), false)? } else { Tree::load(&d.join("sbd.tree3"))? },
@@ -102,6 +108,31 @@ impl Fe {
     pub fn lex_has_prefix(&self, w: &[u8]) -> bool {
         tabs::ptab(0x100782f4, 0x10078300).find(w, true) >= 0
     }
+}
+
+/// `fe_LoadUserDictCsv`'s alias pass: `fe_AnalyzeSentence` on the target in a fresh WA (the
+/// `FUN_1003e070` normalizer, then lookup and merge), and every record's phones joined by `\`.
+fn alias_phones(lex: &crate::lexicon::Lexicon, target: &[u8]) -> Vec<u8> {
+    let t = padded(target);
+    let mut wa = Wa::new();
+    for i in 0..wa::MAX as i32 {
+        wa.set_ri32(i, 0xc, -1);
+    }
+    userdict::alias_words(&mut wa, &t);
+    let mut lw = crate::ling::Wa::new();
+    lw.b.copy_from_slice(&wa.b[..crate::ling::WA_SIZE]);
+    let n = lw.n();
+    let mut ws = crate::ling::Ws::new();
+    crate::ling::analysis::tag_and_pronounce(&mut ws, &mut lw, n, lex, &lex.poly);
+    crate::ling::merge::merge(&ws, &mut lw);
+    let mut out = Vec::new();
+    for i in 0..n {
+        if i > 0 {
+            out.push(b'\\');
+        }
+        out.extend_from_slice(lw.cstr(crate::ling::Wa::rec(i) + crate::ling::war::PHONES));
+    }
+    out
 }
 
 /// One sentence as the normalizer leaves it (`fe_NormalizeTokens` onLeave).
